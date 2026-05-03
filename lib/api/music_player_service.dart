@@ -104,6 +104,12 @@ class MusicPlayerService {
     });
     _player.stream.log.listen((l) {
       // mpv-level logs (warn/error only to keep noise down).
+      // NOTE: media_kit's libmpv log callback is shared globally across all
+      // Player instances in the process — meaning logs from the IPTV player
+      // (or any other Player) also reach this listener. Only print when this
+      // service has an active track loaded so we don't take blame for
+      // unrelated mpv chatter.
+      if (currentTrack.value == null) return;
       if (l.level == 'error' || l.level == 'warn' || l.level == 'fatal') {
         debugPrint('MusicPlayerService: mpv [${l.level}] ${l.prefix}: ${l.text}');
       }

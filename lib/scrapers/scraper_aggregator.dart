@@ -18,7 +18,7 @@ class ScraperAggregator {
     // TheRarbgScraper(),
     // TorrentGalaxyScraper(),
     UindexScraper(),
-    YtsScraper(),
+    // YtsScraper(),
   ];
   
   static Future<List<Map<String, dynamic>>> searchAll(String query) async {

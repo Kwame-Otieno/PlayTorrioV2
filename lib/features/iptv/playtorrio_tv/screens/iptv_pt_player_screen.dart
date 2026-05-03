@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:io' show Platform;
-import 'dart:ui';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -19,6 +18,12 @@ class IptvPlaySource {
   const IptvPlaySource({required this.url, required this.label});
 }
 
+/// Dedicated IPTV player using libmpv (media_kit). Includes:
+///   • Watchdog (3 detectors): long buffering, frozen position, ready-but-not-playing
+///   • Tiered recovery: seek-zero → reload → stop+open → recreate
+///   • Multi-source rotation
+///   • Backoff retries with healthy-streak reset
+///   • Pretty responsive overlay UI
 class IptvPtPlayerScreen extends StatefulWidget {
   final List<IptvPlaySource> sources;
   final String title;
@@ -33,6 +38,7 @@ class IptvPtPlayerScreen extends StatefulWidget {
     this.logoUrl,
   });
 
+  /// Convenience: build for a single Xtream stream.
   factory IptvPtPlayerScreen.singleStream({
     Key? key,
     required String url,
@@ -47,6 +53,7 @@ class IptvPtPlayerScreen extends StatefulWidget {
         logoUrl: stream.icon,
       );
 
+  /// Convenience: build for a list of channel hits (multi-source).
   factory IptvPtPlayerScreen.fromHits({
     Key? key,
     required List<ChannelHit> hits,
@@ -74,55 +81,55 @@ class IptvPtPlayerScreen extends StatefulWidget {
 }
 
 class _IptvPtPlayerScreenState extends State<IptvPtPlayerScreen>
-    with WidgetsBindingObserver, SingleTickerProviderStateMixin {
+    with WidgetsBindingObserver {
   late Player _player;
   late VideoController _controller;
 
-  StreamSubscription? _posSub, _playingSub, _bufferingSub, _errorSub;
+  StreamSubscription? _posSub, _playingSub, _bufferingSub, _errorSub, _logSub;
 
   int _sourceIdx = 0;
   bool _playing = false;
   bool _buffering = false;
   bool _userPlayWhenReady = true;
+  String? _statusBanner;
   bool _controlsVisible = true;
   Timer? _hideControlsTimer;
 
-  // Live dot pulse animation
-  late AnimationController _livePulseController;
-  late Animation<double> _livePulseAnim;
-
-  // Watchdog
+  // Watchdog state
   Timer? _watchdog;
   Duration _lastPos = Duration.zero;
   DateTime _lastPosChange = DateTime.now();
   DateTime? _bufferingSince;
   DateTime? _readyNotPlayingSince;
+  // When the current source was last opened. Used by detector 4 to find
+  // "playing=true but never produced a first frame" — the classic
+  // CDN-dropped-mid-handshake hang where mpv neither buffers nor errors.
+  DateTime _openedAt = DateTime.now();
 
-  // Audio
-  double _volume = 100.0;
+  // Audio state
+  double _volume = 100.0; // 0..100 (mpv scale)
   double _volumeBeforeMute = 100.0;
   bool _muted = false;
   bool _showVolumeSlider = false;
   Timer? _hideVolumeTimer;
 
-  // Fullscreen
+  // Fullscreen state (desktop only — mobile is permanently immersive)
   bool _isFullscreen = false;
   bool get _isDesktop =>
       !kIsWeb && (Platform.isWindows || Platform.isMacOS || Platform.isLinux);
-  bool get _isAndroid => !kIsWeb && Platform.isAndroid;
-  bool get _isIOS => !kIsWeb && Platform.isIOS;
 
   // Retry state
   int _retryAttempt = 0;
   DateTime? _lastRecoveryAt;
+  // When the user explicitly paused (so play-after-pause can rejoin live edge)
   DateTime? _pausedAt;
-  bool _recoveryInFlight = false;
-  static const Duration _liveRejoinThreshold = Duration(seconds: 2);
-  static const Duration _healthyStreakNeeded = Duration(seconds: 8);
+  final List<int> _backoffMs = const [500, 1000, 2000, 3000, 4000, 6000, 8000, 8000];
   static const int _maxRetries = 8;
-  // Tier thresholds (ms)
-  static const int _tier2StallMs = 5000; // full recreate
-  final List<int> _backoffMs = const [300, 600, 1000, 1500, 2000, 3000, 4000, 5000];
+  static const Duration _healthyStreakNeeded = Duration(seconds: 6);
+  // After exhausting per-source retries on a single-source stream, keep
+  // probing every N seconds forever — live IPTV channels routinely come
+  // back from short outages, so we don't want to give up.
+  static const Duration _coldRetryInterval = Duration(seconds: 15);
 
   static const _ua = 'VLC/3.0.20 LibVLC/3.0.20';
 
@@ -130,21 +137,15 @@ class _IptvPtPlayerScreenState extends State<IptvPtPlayerScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-
-    _livePulseController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 900),
-    )..repeat(reverse: true);
-    _livePulseAnim = Tween<double>(begin: 0.4, end: 1.0).animate(
-      CurvedAnimation(parent: _livePulseController, curve: Curves.easeInOut),
-    );
-
-    _initChrome();
+    _initOrientationAndChrome();
     WakelockPlus.enable();
-
     _player = Player(
       configuration: const PlayerConfiguration(
-        bufferSize: 8 * 1024 * 1024, // 8MB — smaller = less initial buffering
+        // Generous libmpv-side buffer. Most IPTV stalls are caused by tiny
+        // buffers running dry on jittery upstream feeds — at 64 MB we can
+        // ride out a ~5–10 s upstream stall on a 1080p stream without
+        // showing the user a single buffering icon.
+        bufferSize: 64 * 1024 * 1024,
         logLevel: MPVLogLevel.warn,
       ),
     );
@@ -156,82 +157,84 @@ class _IptvPtPlayerScreenState extends State<IptvPtPlayerScreen>
     _scheduleHideControls();
   }
 
+  /// Set libmpv/FFmpeg properties that turn media_kit into a real IPTV player.
+  /// Sources: mpv issue #5793, char101 reload-on-stall pattern, FFmpeg
+  /// reconnect_* options. Tested for HLS / MPEG-TS / RTSP / Xtream live.
   Future<void> _applyMpvTunables() async {
     try {
       final p = _player.platform;
       if (p is! NativePlayer) return;
 
-      // ── Hardware decoding (platform-specific) ─────────────────────────────
-      // Android: mediacodec — the only hw decoder that works with media_kit's
-      //   Surface-based renderer. auto-safe on Android often falls back to SW.
-      // iOS: videotoolbox — Apple's HW decode API.
-      // Desktop: auto-safe — tries hw but never crashes if unavailable.
-      if (_isAndroid) {
-        await p.setProperty('hwdec', 'mediacodec');
-      } else if (_isIOS) {
-        await p.setProperty('hwdec', 'videotoolbox');
-      } else {
-        await p.setProperty('hwdec', 'auto-safe');
-      }
+      // Network: fail fast so the watchdog can step in
+      await p.setProperty('network-timeout', '15');
 
-      // ── Low-latency profile ───────────────────────────────────────────────
-      // mpv's built-in profile sets: audio-buffer=0, vd-lavc-threads=1,
-      // cache-pause=no, fflags=+nobuffer, video-latency-hacks=yes,
-      // stream-buffer-size=4k. Activating it first, then we override below.
-      await p.setProperty('profile', 'low-latency');
-
-      // ── Video sync ────────────────────────────────────────────────────────
-      // display-resample: smooth frame pacing tied to display refresh rate.
-      // Reduces judder on Xtream H.264/H.265 streams with bad timestamps.
-      await p.setProperty('video-sync', 'display-resample');
-
-      // ── Live demux ────────────────────────────────────────────────────────
-      // live=1 tells libavformat this is a live stream — changes timestamp
-      // handling so it doesn't try to seek to "beginning" on reconnect.
-      // probesize/analyzeduration: enough to detect codec params on junk
-      // Xtream encoders without taking forever to start.
-      await p.setProperty(
-        'demuxer-lavf-o',
-        'live=1,'
-            'fflags=+nobuffer+discardcorrupt,'
-            'probesize=1000000,'
-            'analyzeduration=1000000',
-      );
-
-      // ── Cache: NONE for live ───────────────────────────────────────────────
-      // For live IPTV, a large cache causes mpv to try to fill it before
-      // starting playback → the initial "buffering forever" problem.
-      // No cache = start playing as soon as the first keyframe arrives.
-      await p.setProperty('cache', 'no');
+      // Cache: prioritise SMOOTHNESS over live-edge latency. We aggressively
+      // pre-buffer ~30 s of forward data and let mpv hold up to 150 MB so
+      // brief upstream hiccups never reach the screen. cache-pause stays
+      // OFF — we'd rather let the decoder skip frames than show a spinner.
+      await p.setProperty('cache', 'yes');
+      await p.setProperty('cache-secs', '30');
+      await p.setProperty('demuxer-readahead-secs', '20');
+      await p.setProperty('demuxer-max-bytes', '150000000');
+      await p.setProperty('demuxer-max-back-bytes', '25000000');
       await p.setProperty('cache-pause', 'no');
       await p.setProperty('cache-pause-initial', 'no');
+      // Larger audio buffer too — audio underruns are the most jarring
+      // form of buffering on IPTV feeds.
+      await p.setProperty('audio-buffer', '1.0');
 
-      // ── Network ───────────────────────────────────────────────────────────
-      await p.setProperty('network-timeout', '10'); // fail fast → watchdog takes over
-      await p.setProperty('rtsp-transport', 'tcp');
-      await p.setProperty('user-agent', _ua);
-      await p.setProperty('hls-bitrate', 'max');
-
-      // ── Keep-open: don't quit on EOF / brief drop ────────────────────────
+      // Don't quit on EOF / brief disconnect — let us recover
       await p.setProperty('keep-open', 'yes');
       await p.setProperty('keep-open-pause', 'no');
 
-      // ── FFmpeg reconnect knobs ────────────────────────────────────────────
+      // HLS: pick best variant
+      await p.setProperty('hls-bitrate', 'max');
+
+      // RTSP over TCP — way more reliable on flaky networks
+      await p.setProperty('rtsp-transport', 'tcp');
+
+      // Many Xtream panels gate streams on a VLC user-agent
+      await p.setProperty('user-agent', _ua);
+
+      // FFmpeg reconnect knobs (the proven set from gist + alexishuxley)
       await p.setProperty(
         'stream-lavf-o',
         'reconnect=1,'
             'reconnect_at_eof=1,'
             'reconnect_streamed=1,'
-            'reconnect_delay_max=3,'
+            'reconnect_delay_max=5,'
             'reconnect_on_network_error=1,'
             'reconnect_on_http_error=4xx\\,5xx',
       );
+
+      // MPEG-TS / HLS demux tuning.
+      //   probesize=5MB, analyzeduration=5s — big enough for ffmpeg to
+      //                                       detect real codec params.
+      //   discardcorrupt                    — drop junk packets silently.
+      // We deliberately DO NOT set fflags=+nobuffer here. +nobuffer tells
+      // ffmpeg to push frames the instant they arrive, which is great for
+      // sub-second-latency live but means any upstream jitter ⇒ visible
+      // buffer underrun. For IPTV we'd rather have ~1–2 s of demuxer
+      // smoothing than a spinner every 30 s.
+      // HLS-only options (live_start_index, m3u8_hold_counters, etc.) are
+      // intentionally not set — when the stream isn't HLS, libavformat
+      // rejects them and mpv prints noisy errors the watchdog mistakes
+      // for stream failures.
+      await p.setProperty(
+        'demuxer-lavf-o',
+        'fflags=+discardcorrupt+genpts,'
+            'probesize=5000000,'
+            'analyzeduration=5000000',
+      );
     } catch (e) {
-      debugPrint('[IPTV Player] tunables error: $e');
+      debugPrint('[IPTV Player] tunables failed: $e');
     }
   }
 
-  Future<void> _initChrome() async {
+  Future<void> _initOrientationAndChrome() async {
+    // Don't auto-enter fullscreen or force landscape — the player opens in a
+    // normal window/portrait, and the user enters fullscreen explicitly via
+    // the fullscreen button.
     _isFullscreen = false;
   }
 
@@ -240,10 +243,15 @@ class _IptvPtPlayerScreenState extends State<IptvPtPlayerScreen>
       try {
         final isFull = await windowManager.isFullScreen();
         if (isFull) {
+          // Leaving fullscreen — also drop maximize so the user gets a real window.
           await windowManager.setFullScreen(false);
-          if (await windowManager.isMaximized()) await windowManager.unmaximize();
+          if (await windowManager.isMaximized()) {
+            await windowManager.unmaximize();
+          }
         } else {
-          if (await windowManager.isMaximized()) await windowManager.unmaximize();
+          if (await windowManager.isMaximized()) {
+            await windowManager.unmaximize();
+          }
           await windowManager.setFullScreen(true);
         }
         if (mounted) setState(() => _isFullscreen = !isFull);
@@ -255,7 +263,10 @@ class _IptvPtPlayerScreenState extends State<IptvPtPlayerScreen>
       );
       await SystemChrome.setPreferredOrientations(
         goFull
-            ? [DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight]
+            ? [
+                DeviceOrientation.landscapeLeft,
+                DeviceOrientation.landscapeRight,
+              ]
             : DeviceOrientation.values,
       );
       if (mounted) setState(() => _isFullscreen = goFull);
@@ -269,19 +280,34 @@ class _IptvPtPlayerScreenState extends State<IptvPtPlayerScreen>
       if (pos != _lastPos) {
         _lastPos = pos;
         _lastPosChange = DateTime.now();
+        // Healthy streak — reset retry count if we've been ticking smoothly
+        if (_retryAttempt > 0 &&
+            DateTime.now().difference(_lastPosChange) <
+                const Duration(milliseconds: 200) &&
+            _statusBanner == null) {
+          // we'll evaluate streak in watchdog
+        }
       }
     });
-
     _playingSub = _player.stream.playing.listen((p) {
       if (!mounted) return;
       setState(() => _playing = p);
       if (p) {
         _readyNotPlayingSince = null;
       } else if (_userPlayWhenReady) {
-        _readyNotPlayingSince ??= DateTime.now();
+        // libmpv silently went paused while the user wants playback. On a
+        // live IPTV stream this is the classic "feed died, mpv hit EOF and
+        // toggled pause=yes" symptom. Poke play() once immediately — if it
+        // takes, great; if it doesn't, the watchdog will hard-reload us.
+        _readyNotPlayingSince = DateTime.now();
+        Future.microtask(() async {
+          if (!mounted || !_userPlayWhenReady || _playing) return;
+          try {
+            await _player.play();
+          } catch (_) {}
+        });
       }
     });
-
     _bufferingSub = _player.stream.buffering.listen((b) {
       if (!mounted) return;
       setState(() => _buffering = b);
@@ -291,24 +317,59 @@ class _IptvPtPlayerScreenState extends State<IptvPtPlayerScreen>
         _bufferingSince = null;
       }
     });
-
     _errorSub = _player.stream.error.listen((err) {
       final msg = err.toString();
+      debugPrint('[IPTV Player] error: $msg');
+      // Benign mpv chatter we don't want to restart the stream over:
+      //  - "Cannot seek in this stream" / "force-seekable=yes"  → pure-live
+      //    stream, the live-edge seek failed (harmless).
+      //  - "Expected '=' and a value"                          → libav option
+      //    parser warning for HLS-only opts on a non-HLS stream.
       final lower = msg.toLowerCase();
-      // Benign errors — don't trigger recovery
       if (lower.contains('cannot seek') ||
           lower.contains('force-seekable') ||
-          lower.contains("expected '=' and a value") ||
-          lower.contains('live=1')) {
+          lower.contains("expected '=' and a value")) {
         return;
       }
-      debugPrint('[IPTV Player] error: $msg');
+      // "Stream ends prematurely" / "End of file" on a live HTTP feed means
+      // the CDN dropped the TCP connection mid-stream. mpv's reconnect_at_eof
+      // only fires on clean EOF, not on premature close, so we have to force
+      // a full player recreation to get a fresh socket — gentle seek/reopen
+      // attempts will just keep failing on the same dead connection.
+      if (lower.contains('ends prematurely') ||
+          lower.contains('end of file') ||
+          lower.contains('connection reset')) {
+        _triggerRecovery(reason: 'connection dropped: $msg', forceHard: true);
+        return;
+      }
       _triggerRecovery(reason: 'error: $msg');
+    });
+    // mpv log stream catches conditions that don't surface as `error`
+    // events — most importantly, ffmpeg's "http: Stream ends prematurely"
+    // (CDN dropped the TCP connection mid-stream). Without this, the
+    // watchdog only sees the resulting position freeze and tries gentle
+    // recoveries that can't fix a dead socket.
+    _logSub = _player.stream.log.listen((l) {
+      if (l.level != 'error' && l.level != 'fatal' && l.level != 'warn') {
+        return;
+      }
+      final text = l.text.toLowerCase();
+      if (text.contains('ends prematurely') ||
+          text.contains('end of file') ||
+          text.contains('connection reset') ||
+          text.contains('connection refused') ||
+          text.contains('connection timed out')) {
+        debugPrint('[IPTV Player] mpv log: ${l.level} ${l.prefix}: ${l.text}');
+        _triggerRecovery(
+            reason: 'mpv log: ${l.text}', forceHard: true);
+      }
     });
   }
 
   Future<void> _openCurrent() async {
     final src = widget.sources[_sourceIdx];
+    // Connect silently — no banner. The buffering indicator (if any) will
+    // appear naturally while the stream loads.
     try {
       await _player.open(
         Media(src.url, httpHeaders: const {'User-Agent': _ua}),
@@ -318,89 +379,247 @@ class _IptvPtPlayerScreenState extends State<IptvPtPlayerScreen>
       _pausedAt = null;
       _lastPos = Duration.zero;
       _lastPosChange = DateTime.now();
+      _openedAt = DateTime.now();
+      // For HLS streams that DO expose a DVR window, jump to the live edge
+      // shortly after open so we never replay stale buffered packets.
+      _scheduleJumpToLive();
+      // Clear banner after a short successful run
+      Future.delayed(const Duration(seconds: 2), () {
+        if (!mounted) return;
+        if (_playing && !_buffering) {
+          setState(() => _statusBanner = null);
+        }
+      });
     } catch (e) {
       _triggerRecovery(reason: 'open failed: $e');
     }
   }
 
-  void _startWatchdog() {
-    // Poll every 500ms — twice as fast as before for quicker reaction
-    _watchdog = Timer.periodic(const Duration(milliseconds: 500), (_) {
+  /// Best-effort jump to the live edge after a (re)open.
+  /// Only fires when the stream actually exposes a DVR window (seekable=yes
+  /// AND a finite duration). On pure-live streams seeking emits a noisy
+  /// "Cannot seek in this stream / force-seekable=yes" error that the
+  /// watchdog would otherwise treat as a failure.
+  void _scheduleJumpToLive() {
+    Future.delayed(const Duration(milliseconds: 1500), () async {
       if (!mounted) return;
-      final now = DateTime.now();
+      try {
+        final p = _player.platform;
+        if (p is! NativePlayer) return;
 
-      // ── Healthy streak → reset retry counter ──────────────────────────────
-      if (_retryAttempt > 0 &&
-          _playing &&
-          !_buffering &&
-          _lastRecoveryAt != null &&
-          now.difference(_lastRecoveryAt!) > _healthyStreakNeeded) {
-        debugPrint('[Watchdog] healthy — resetting retries');
-        _retryAttempt = 0;
-        _lastRecoveryAt = null;
-      }
-
-      // ── Detector 1: buffering stall ───────────────────────────────────────
-      if (_userPlayWhenReady && _bufferingSince != null) {
-        final stalledMs = now.difference(_bufferingSince!).inMilliseconds;
-        if (stalledMs > _tier2StallMs) {
-          _triggerRecovery(reason: 'buffering > ${_tier2StallMs}ms');
+        final seekableRaw = await p.getProperty('seekable');
+        final durRaw = await p.getProperty('duration');
+        final isSeekable = seekableRaw.toString().toLowerCase() == 'yes';
+        final dur = double.tryParse(durRaw.toString()) ?? 0.0;
+        if (!isSeekable || dur <= 0) {
+          // Pure live — nothing to seek to.
           return;
         }
-      }
 
-      // ── Detector 2: position frozen while playing ─────────────────────────
-      if (_playing) {
-        final frozenMs = now.difference(_lastPosChange).inMilliseconds;
-        if (frozenMs > _tier2StallMs) {
-          _triggerRecovery(reason: 'position frozen > ${_tier2StallMs}ms');
-          return;
-        }
-      }
-
-      // ── Detector 3: should play but not playing ───────────────────────────
-      if (_userPlayWhenReady &&
-          !_playing &&
-          _readyNotPlayingSince != null &&
-          now.difference(_readyNotPlayingSince!).inMilliseconds > _tier2StallMs) {
-        _triggerRecovery(reason: 'not playing > ${_tier2StallMs}ms');
+        // Drop any data that piled up while paused / mid-recovery, then
+        // jump to the live edge of the DVR window.
+        await p.command(['drop-buffers']);
+        await p.command(['seek', '99999', 'absolute']);
+      } catch (_) {
+        // Best-effort — ignore.
       }
     });
   }
 
-  Future<void> _triggerRecovery({required String reason}) async {
+  void _startWatchdog() {
+    _watchdog = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      final now = DateTime.now();
+
+      // Healthy streak resets retry counter
+      if (_retryAttempt > 0 &&
+          _playing &&
+          !_buffering &&
+          now.difference(_lastPosChange) < const Duration(milliseconds: 1500) &&
+          _lastRecoveryAt != null &&
+          now.difference(_lastRecoveryAt!) > _healthyStreakNeeded) {
+        debugPrint('[IPTV Watchdog] healthy streak — resetting retries');
+        _retryAttempt = 0;
+        _lastRecoveryAt = null;
+        if (mounted) setState(() => _statusBanner = null);
+      }
+
+      // Detector 1: long buffering. Mid-stream stalls with a 30 s buffer
+      // shouldn't last more than ~10 s; before the first frame, the slow
+      // initial connect to a remote `.ts` feed needs more grace.
+      final bufferGrace = _lastPos > Duration.zero
+          ? const Duration(milliseconds: 12000)
+          : const Duration(milliseconds: 25000);
+      if (_userPlayWhenReady &&
+          _bufferingSince != null &&
+          now.difference(_bufferingSince!) > bufferGrace) {
+        _triggerRecovery(reason: 'buffering > ${bufferGrace.inSeconds}s');
+        return;
+      }
+      // Detector 2: position frozen while playing.
+      // CRITICAL gates to avoid false positives on initial connect:
+      //  • !_buffering — if mpv reports buffering, position-not-advancing is
+      //    expected and detector 1 is the right signal.
+      //  • _lastPos > 0 — we must have received at least one decoded frame
+      //    since the last open. Until first frame, mpv flips playing=true
+      //    on play() but the position stream is silent; on slow streams
+      //    the initial connect easily exceeds 8 s.
+      if (_playing &&
+          !_buffering &&
+          _lastPos > Duration.zero &&
+          now.difference(_lastPosChange) > const Duration(milliseconds: 8000)) {
+        _triggerRecovery(reason: 'position frozen > 8s');
+        return;
+      }
+      // Detector 3: should be playing but isn't. For LIVE IPTV, a sustained
+      // self-pause (mpv flipped to pause=yes on its own) almost always means
+      // the upstream feed ended — live TV doesn't end, ever, so this is
+      // dead. Skip the gradual seek→reload backoff and go straight to a hard
+      // reopen (forceHard:true).
+      if (_userPlayWhenReady &&
+          !_playing &&
+          _readyNotPlayingSince != null &&
+          now.difference(_readyNotPlayingSince!) >
+              const Duration(milliseconds: 3000)) {
+        _triggerRecovery(reason: 'silent self-pause > 3s', forceHard: true);
+        return;
+      }
+      // Detector 4: opened but never produced a first frame. The classic
+      // "CDN dropped the connection mid-handshake" hang where mpv keeps
+      // playing=true, never flips buffering, never errors, just sits there
+      // with position=0 forever. None of detectors 1-3 catch this:
+      //   • detector 1 needs buffering=true (mpv may not set it)
+      //   • detector 2 is gated on _lastPos > 0
+      //   • detector 3 needs playing=false (mpv stays true)
+      // 30 s is well past the 25 s initial-connect grace in detector 1.
+      if (_userPlayWhenReady &&
+          _lastPos == Duration.zero &&
+          now.difference(_openedAt) > const Duration(seconds: 30)) {
+        _triggerRecovery(
+            reason: 'no first frame after 30s', forceHard: true);
+      }
+    });
+  }
+
+  bool _recoveryInFlight = false;
+  Future<void> _triggerRecovery({
+    required String reason,
+    bool forceHard = false,
+  }) async {
     if (_recoveryInFlight) return;
     final now = DateTime.now();
-    // Throttle: don't trigger again within 1s of last recovery
     if (_lastRecoveryAt != null &&
-        now.difference(_lastRecoveryAt!).inMilliseconds < 1000) {
-      return;
+        now.difference(_lastRecoveryAt!) <
+            const Duration(milliseconds: 1500)) {
+      return; // throttle
     }
-
     _recoveryInFlight = true;
     _lastRecoveryAt = now;
-    debugPrint('[Watchdog] recovery #${_retryAttempt + 1}: $reason');
+    debugPrint(
+        '[IPTV Watchdog] recovery (#${_retryAttempt + 1}, hard=$forceHard): $reason');
 
     try {
-      // ── Source exhausted → give up ────────────────────────────────────────
       if (_retryAttempt >= _maxRetries) {
+        // Rotate to the next source if we have one.
         if (_sourceIdx < widget.sources.length - 1) {
           _sourceIdx++;
           _retryAttempt = 0;
-          debugPrint('[Watchdog] rotating to source $_sourceIdx');
+          if (mounted) {
+            setState(() =>
+                _statusBanner = 'Switching to ${widget.sources[_sourceIdx].label}…');
+          }
           await _openCurrent();
+          return;
         }
-        // If no more sources, just stop — watchdog keeps running if user retries
+        // Single-source channel that won't connect. Don't give up — live
+        // streams come back. Wipe the player completely and try again on a
+        // long interval so we're not hammering a dead endpoint.
+        if (mounted) {
+          setState(() => _statusBanner =
+              'Stream offline — retrying every ${_coldRetryInterval.inSeconds}s…');
+        }
+        await Future.delayed(_coldRetryInterval);
+        try {
+          await _disposePlayer();
+          _player = Player(
+            configuration: const PlayerConfiguration(
+              bufferSize: 64 * 1024 * 1024,
+              logLevel: MPVLogLevel.warn,
+            ),
+          );
+          _controller = VideoController(_player);
+          _bind();
+          await _applyMpvTunables();
+        } catch (e) {
+          debugPrint('[IPTV] cold-retry recreate failed: $e');
+        }
+        // Reset the retry ladder so the next ladder run gets fresh backoff.
+        _retryAttempt = 0;
+        try {
+          await _player.open(
+            Media(widget.sources[_sourceIdx].url,
+                httpHeaders: const {'User-Agent': _ua}),
+          );
+          await _player.play();
+        } catch (e) {
+          debugPrint('[IPTV] cold-retry open failed: $e');
+        }
+        if (mounted) setState(() {});
+        _bufferingSince = null;
+        _readyNotPlayingSince = null;
+        _lastPos = Duration.zero;
+        _lastPosChange = DateTime.now();
+        _openedAt = DateTime.now();
         return;
       }
 
       _retryAttempt++;
       final delayIdx = (_retryAttempt - 1).clamp(0, _backoffMs.length - 1);
-      await Future.delayed(Duration(milliseconds: _backoffMs[delayIdx]));
+      final delay = _backoffMs[delayIdx];
+      // Show what we're doing so the user isn't staring at a frozen spinner.
+      if (mounted) {
+        setState(() => _statusBanner =
+            'Reconnecting\u2026 (attempt $_retryAttempt/$_maxRetries)');
+      }
 
-      if (_retryAttempt <= 3) {
-        // ── Tier 1: fast stop → open ─────────────────────────────────────
-        // Skipping seek(Duration.zero) — pointless on live, causes noisy errors
+      await Future.delayed(Duration(milliseconds: delay));
+
+      // Fast path: silent self-pause on a live stream means the feed is
+      // gone. A seek/reload won't bring it back — jump straight to the
+      // "recreate the player" tier so we get a fully fresh socket.
+      if (forceHard) {
+        try {
+          await _disposePlayer();
+          _player = Player(
+            configuration: const PlayerConfiguration(
+              bufferSize: 64 * 1024 * 1024,
+              logLevel: MPVLogLevel.warn,
+            ),
+          );
+          _controller = VideoController(_player);
+          _bind();
+          await _applyMpvTunables();
+          await _player.open(
+            Media(widget.sources[_sourceIdx].url,
+                httpHeaders: const {'User-Agent': _ua}),
+          );
+          await _player.play();
+          if (mounted) setState(() {});
+        } catch (e) {
+          debugPrint('[IPTV] hard recreate failed: $e');
+        }
+      } else if (_retryAttempt <= 2) {
+        try {
+          await _player.seek(Duration.zero);
+        } catch (_) {}
+        try {
+          await _player.open(
+            Media(widget.sources[_sourceIdx].url,
+                httpHeaders: const {'User-Agent': _ua}),
+          );
+          await _player.play();
+        } catch (_) {}
+      } else if (_retryAttempt <= 4) {
         try {
           await _player.stop();
         } catch (_) {}
@@ -412,33 +631,33 @@ class _IptvPtPlayerScreenState extends State<IptvPtPlayerScreen>
           await _player.play();
         } catch (_) {}
       } else {
-        // ── Tier 2: full player recreate ─────────────────────────────────
-        await _disposePlayer();
-        _player = Player(
-          configuration: const PlayerConfiguration(
-            bufferSize: 8 * 1024 * 1024,
-            logLevel: MPVLogLevel.warn,
-          ),
-        );
-        _controller = VideoController(_player);
-        _bind();
-        await _applyMpvTunables();
+        // Recreate
         try {
+          await _disposePlayer();
+          _player = Player(
+            configuration: const PlayerConfiguration(
+              bufferSize: 64 * 1024 * 1024,
+              logLevel: MPVLogLevel.warn,
+            ),
+          );
+          _controller = VideoController(_player);
+          _bind();
+          await _applyMpvTunables();
           await _player.open(
             Media(widget.sources[_sourceIdx].url,
                 httpHeaders: const {'User-Agent': _ua}),
           );
           await _player.play();
+          if (mounted) setState(() {});
         } catch (e) {
-          debugPrint('[Watchdog] recreate open failed: $e');
+          debugPrint('[IPTV] recreate failed: $e');
         }
-        if (mounted) setState(() {});
       }
-
       _bufferingSince = null;
       _readyNotPlayingSince = null;
       _lastPos = Duration.zero;
       _lastPosChange = DateTime.now();
+      _openedAt = DateTime.now();
     } finally {
       _recoveryInFlight = false;
     }
@@ -449,6 +668,7 @@ class _IptvPtPlayerScreenState extends State<IptvPtPlayerScreen>
     await _playingSub?.cancel();
     await _bufferingSub?.cancel();
     await _errorSub?.cancel();
+    await _logSub?.cancel();
     try {
       await _player.dispose();
     } catch (_) {}
@@ -465,7 +685,8 @@ class _IptvPtPlayerScreenState extends State<IptvPtPlayerScreen>
 
   void _scheduleHideControls() {
     _hideControlsTimer?.cancel();
-    _hideControlsTimer = Timer(const Duration(seconds: 4), () {
+    _hideControlsTimer =
+        Timer(const Duration(seconds: 4), () {
       if (!mounted) return;
       setState(() => _controlsVisible = false);
     });
@@ -479,7 +700,6 @@ class _IptvPtPlayerScreenState extends State<IptvPtPlayerScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _livePulseController.dispose();
     _watchdog?.cancel();
     _hideControlsTimer?.cancel();
     _hideVolumeTimer?.cancel();
@@ -488,6 +708,7 @@ class _IptvPtPlayerScreenState extends State<IptvPtPlayerScreen>
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     SystemChrome.setPreferredOrientations(DeviceOrientation.values);
     if (_isDesktop) {
+      // Restore a normal (non-fullscreen, non-maximized) window when leaving.
       Future.microtask(() async {
         try {
           if (await windowManager.isFullScreen()) {
@@ -502,10 +723,10 @@ class _IptvPtPlayerScreenState extends State<IptvPtPlayerScreen>
     super.dispose();
   }
 
-  // ── Build ──────────────────────────────────────────────────────────────────
-
   @override
   Widget build(BuildContext context) {
+    final size = MediaQuery.sizeOf(context);
+    final compact = size.shortestSide < 600;
     return Scaffold(
       backgroundColor: Colors.black,
       body: GestureDetector(
@@ -514,7 +735,7 @@ class _IptvPtPlayerScreenState extends State<IptvPtPlayerScreen>
         child: Stack(
           fit: StackFit.expand,
           children: [
-            // Video surface
+            // Video
             Center(
               child: Video(
                 controller: _controller,
@@ -522,17 +743,15 @@ class _IptvPtPlayerScreenState extends State<IptvPtPlayerScreen>
                 controls: NoVideoControls,
               ),
             ),
-
-            // Buffering shimmer overlay (replaces banner chip)
-            if (_buffering) _buildBufferingOverlay(),
-
-            // Controls overlay (top bar + bottom pill)
+            // Reconnect/buffering banner
+            if (_buffering || _statusBanner != null) _buildBanner(),
+            // Top bar + bottom controls
             AnimatedOpacity(
-              duration: const Duration(milliseconds: 200),
+              duration: const Duration(milliseconds: 220),
               opacity: _controlsVisible ? 1 : 0,
               child: IgnorePointer(
                 ignoring: !_controlsVisible,
-                child: _buildControls(),
+                child: _buildOverlay(compact),
               ),
             ),
           ],
@@ -541,35 +760,37 @@ class _IptvPtPlayerScreenState extends State<IptvPtPlayerScreen>
     );
   }
 
-  // ── Buffering shimmer ──────────────────────────────────────────────────────
-
-  Widget _buildBufferingOverlay() {
-    return Positioned.fill(
+  Widget _buildBanner() {
+    return Positioned(
+      top: 80,
+      left: 0,
+      right: 0,
       child: Center(
-        child: _GlassCard(
-          padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 18),
-          borderRadius: 40,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: 0.7),
+            borderRadius: BorderRadius.circular(24),
+            border: Border.all(color: const Color(0xFF00E5FF).withValues(alpha: 0.4)),
+          ),
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              SizedBox(
-                width: 20,
-                height: 20,
+              const SizedBox(
+                width: 18,
+                height: 18,
                 child: CircularProgressIndicator(
                   strokeWidth: 2,
-                  valueColor: AlwaysStoppedAnimation(
-                    Colors.white.withValues(alpha: 0.9),
-                  ),
+                  color: Color(0xFF00E5FF),
                 ),
               ),
-              const SizedBox(width: 14),
+              const SizedBox(width: 12),
               Text(
-                'Connecting…',
-                style: GoogleFonts.dmSans(
+                _statusBanner ?? 'Buffering…',
+                style: GoogleFonts.poppins(
                   color: Colors.white,
-                  fontSize: 15,
+                  fontSize: 14,
                   fontWeight: FontWeight.w500,
-                  letterSpacing: 0.2,
                 ),
               ),
             ],
@@ -579,155 +800,105 @@ class _IptvPtPlayerScreenState extends State<IptvPtPlayerScreen>
     );
   }
 
-  // ── Controls ───────────────────────────────────────────────────────────────
-
-  Widget _buildControls() {
-    return Column(
-      children: [
-        // Top bar
-        _buildTopBar(),
-        const Spacer(),
-        // Bottom pill
-        Padding(
-          padding: const EdgeInsets.only(bottom: 32, left: 20, right: 20),
-          child: _buildBottomPill(),
+  Widget _buildOverlay(bool compact) {
+    return Container(
+      decoration: const BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [
+            Colors.black87,
+            Colors.transparent,
+            Colors.transparent,
+            Colors.black87,
+          ],
+          stops: [0, 0.25, 0.7, 1],
         ),
-      ],
-    );
-  }
-
-  Widget _buildTopBar() {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(4, 8, 8, 0),
-      child: ClipRRect(
-        borderRadius: const BorderRadius.only(
-          bottomLeft: Radius.circular(20),
-          bottomRight: Radius.circular(20),
-        ),
-        child: BackdropFilter(
-          filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
-          child: Container(
-            padding: const EdgeInsets.fromLTRB(8, 12, 16, 12),
-            decoration: BoxDecoration(
-              color: Colors.black.withValues(alpha: 0.35),
-              border: Border(
-                bottom: BorderSide(
-                  color: Colors.white.withValues(alpha: 0.08),
-                  width: 0.5,
-                ),
-              ),
-            ),
-            child: SafeArea(
-              bottom: false,
-              child: Row(
-                children: [
-                  // Back button
-                  Material(
-                    color: Colors.transparent,
-                    child: InkWell(
-                      borderRadius: BorderRadius.circular(50),
-                      onTap: () => Navigator.of(context).maybePop(),
-                      child: const Padding(
-                        padding: EdgeInsets.all(8),
-                        child: Icon(Icons.arrow_back_ios_new_rounded,
-                            color: Colors.white, size: 20),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 4),
-
-                  // Logo
-                  if ((widget.logoUrl ?? '').isNotEmpty) ...[
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(8),
-                      child: Image.network(
-                        widget.logoUrl!,
-                        width: 34,
-                        height: 34,
-                        fit: BoxFit.cover,
-                        errorBuilder: (_, _, _) => const SizedBox.shrink(),
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                  ],
-
-                  // Title + subtitle
-                  Expanded(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          widget.title,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: GoogleFonts.dmSans(
-                            color: Colors.white,
-                            fontSize: 16,
-                            fontWeight: FontWeight.w700,
-                            letterSpacing: -0.2,
-                          ),
-                        ),
-                        if ((widget.subtitle ?? '').isNotEmpty)
-                          Text(
-                            widget.subtitle!,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: GoogleFonts.dmSans(
-                              color: Colors.white54,
-                              fontSize: 12,
-                              fontWeight: FontWeight.w400,
-                            ),
-                          ),
-                      ],
-                    ),
-                  ),
-
-                  const SizedBox(width: 12),
-
-                  // Live dot
-                  _LiveDot(pulse: _livePulseAnim),
-
-                  const SizedBox(width: 8),
-
-                  // Fullscreen (top-right)
-                  Material(
-                    color: Colors.transparent,
-                    child: InkWell(
-                      borderRadius: BorderRadius.circular(50),
-                      onTap: _toggleFullscreen,
-                      child: Padding(
-                        padding: const EdgeInsets.all(8),
-                        child: Icon(
-                          _isFullscreen
-                              ? Icons.fullscreen_exit_rounded
-                              : Icons.fullscreen_rounded,
-                          color: Colors.white,
-                          size: 22,
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
+      ),
+      child: SafeArea(
+        child: Column(
+          children: [
+            _buildTopBar(compact),
+            const Spacer(),
+            _buildBottomBar(compact),
+          ],
         ),
       ),
     );
   }
 
-  Widget _buildBottomPill() {
-    return _GlassCard(
-      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
-      borderRadius: 50,
+  Widget _buildTopBar(bool compact) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(8, 8, 16, 0),
       child: Row(
-        mainAxisSize: MainAxisSize.min,
         children: [
-          // Play/Pause
-          _PillButton(
+          IconButton(
+            onPressed: () => Navigator.of(context).maybePop(),
+            icon: const Icon(Icons.arrow_back, color: Colors.white),
+          ),
+          if ((widget.logoUrl ?? '').isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(right: 10),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(6),
+                child: Image.network(
+                  widget.logoUrl!,
+                  width: 32,
+                  height: 32,
+                  fit: BoxFit.cover,
+                  errorBuilder: (_, _, _) => const SizedBox.shrink(),
+                ),
+              ),
+            ),
+          Expanded(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  widget.title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: GoogleFonts.bebasNeue(
+                    color: Colors.white,
+                    fontSize: compact ? 18 : 22,
+                    letterSpacing: 1,
+                  ),
+                ),
+                if ((widget.subtitle ?? '').isNotEmpty)
+                  Text(
+                    widget.subtitle!,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: GoogleFonts.poppins(
+                      color: Colors.white70,
+                      fontSize: 12,
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          if (widget.sources.length > 1) ...[
+            const SizedBox(width: 8),
+            _SourceChip(
+              label: widget.sources[_sourceIdx].label,
+              onTap: _showSourcePicker,
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBottomBar(bool compact) {
+    return Container(
+      padding: EdgeInsets.symmetric(
+          horizontal: compact ? 16 : 24, vertical: compact ? 12 : 18),
+      child: Row(
+        children: [
+          _RoundIcon(
             icon: _playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
-            size: 30,
+            big: true,
             onTap: () async {
               if (_playing) {
                 _userPlayWhenReady = false;
@@ -735,43 +906,34 @@ class _IptvPtPlayerScreenState extends State<IptvPtPlayerScreen>
                 await _player.pause();
               } else {
                 _userPlayWhenReady = true;
-                final pausedFor = _pausedAt == null
-                    ? Duration.zero
-                    : DateTime.now().difference(_pausedAt!);
                 _pausedAt = null;
-                if (pausedFor >= _liveRejoinThreshold) {
-                  await _openCurrent();
-                } else {
-                  await _player.play();
-                }
+                // Always just resume — never throw away buffered data on
+                // play. If the user paused specifically to *let the stream
+                // buffer*, blowing the cache and reopening would be the
+                // exact opposite of what they want. If the buffer is too
+                // stale to play, the watchdog will recover us.
+                await _player.play();
               }
               _scheduleHideControls();
             },
           ),
-
-          const SizedBox(width: 4),
-
-          // Reload
-          _PillButton(
+          const SizedBox(width: 14),
+          _RoundIcon(
             icon: Icons.replay_rounded,
-            size: 22,
             onTap: () async {
               _retryAttempt = 0;
               await _openCurrent();
               _scheduleHideControls();
             },
           ),
-
-          const SizedBox(width: 4),
-
-          // Volume
-          _PillButton(
+          const SizedBox(width: 14),
+          // Mute toggle
+          _RoundIcon(
             icon: _muted || _volume == 0
                 ? Icons.volume_off_rounded
                 : (_volume < 40
                     ? Icons.volume_down_rounded
                     : Icons.volume_up_rounded),
-            size: 22,
             onTap: _toggleMute,
             onLongPress: () {
               setState(() => _showVolumeSlider = !_showVolumeSlider);
@@ -779,25 +941,24 @@ class _IptvPtPlayerScreenState extends State<IptvPtPlayerScreen>
               _scheduleHideControls();
             },
           ),
-
-          // Volume slider
+          // Volume slider (responsive: shrinks on small screens)
           AnimatedSize(
             duration: const Duration(milliseconds: 220),
             curve: Curves.easeOut,
             child: SizedBox(
-              width: _showVolumeSlider ? 120 : 0,
+              width: _showVolumeSlider ? (compact ? 110 : 160) : 0,
               child: ClipRect(
                 child: Padding(
-                  padding: const EdgeInsets.only(left: 6),
+                  padding: const EdgeInsets.only(left: 8),
                   child: SliderTheme(
                     data: SliderTheme.of(context).copyWith(
-                      activeTrackColor: Colors.white,
+                      activeTrackColor: const Color(0xFF00E5FF),
                       inactiveTrackColor: Colors.white24,
                       thumbColor: Colors.white,
-                      overlayColor: Colors.white12,
-                      trackHeight: 2.5,
+                      overlayColor: const Color(0x3300E5FF),
+                      trackHeight: 3,
                       thumbShape: const RoundSliderThumbShape(
-                          enabledThumbRadius: 6),
+                          enabledThumbRadius: 7),
                     ),
                     child: Slider(
                       value: _volume.clamp(0.0, 100.0),
@@ -818,24 +979,19 @@ class _IptvPtPlayerScreenState extends State<IptvPtPlayerScreen>
               ),
             ),
           ),
-
-          if (widget.sources.length > 1) ...[
-            const SizedBox(width: 4),
-            // Divider
-            Container(
-              width: 1,
-              height: 22,
-              color: Colors.white.withValues(alpha: 0.15),
-            ),
-            const SizedBox(width: 4),
-            // Source picker
-            _PillButton(
+          const Spacer(),
+          if (widget.sources.length > 1)
+            _RoundIcon(
               icon: Icons.swap_horiz_rounded,
-              size: 22,
               onTap: _showSourcePicker,
-              label: widget.sources[_sourceIdx].label,
             ),
-          ],
+          if (widget.sources.length > 1) const SizedBox(width: 14),
+          _RoundIcon(
+            icon: _isFullscreen
+                ? Icons.fullscreen_exit_rounded
+                : Icons.fullscreen_rounded,
+            onTap: _toggleFullscreen,
+          ),
         ],
       ),
     );
@@ -869,147 +1025,66 @@ class _IptvPtPlayerScreenState extends State<IptvPtPlayerScreen>
   void _showSourcePicker() {
     showModalBottomSheet(
       context: context,
-      backgroundColor: Colors.transparent,
-      isScrollControlled: true,
-      builder: (ctx) => _SourcePickerSheet(
-        sources: widget.sources,
-        activeIdx: _sourceIdx,
-        onSelect: (i) {
-          Navigator.of(ctx).pop();
-          _switchSource(i);
-        },
+      backgroundColor: const Color(0xFF1A1A24),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
-    );
-  }
-}
-
-// ── Live dot ───────────────────────────────────────────────────────────────────
-
-class _LiveDot extends StatelessWidget {
-  final Animation<double> pulse;
-  const _LiveDot({required this.pulse});
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        AnimatedBuilder(
-          animation: pulse,
-          builder: (_, _) => Container(
-            width: 7,
-            height: 7,
-            decoration: BoxDecoration(
-              color: Colors.redAccent.withValues(alpha: pulse.value),
-              shape: BoxShape.circle,
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.red.withValues(alpha: pulse.value * 0.6),
-                  blurRadius: 4,
-                  spreadRadius: 1,
-                ),
-              ],
-            ),
-          ),
-        ),
-        const SizedBox(width: 5),
-        Text(
-          'LIVE',
-          style: GoogleFonts.dmMono(
-            color: Colors.white70,
-            fontSize: 11,
-            fontWeight: FontWeight.w600,
-            letterSpacing: 1.2,
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-// ── Glass card ─────────────────────────────────────────────────────────────────
-
-class _GlassCard extends StatelessWidget {
-  final Widget child;
-  final EdgeInsets padding;
-  final double borderRadius;
-
-  const _GlassCard({
-    required this.child,
-    required this.padding,
-    this.borderRadius = 24,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(borderRadius),
-      child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
-        child: Container(
-          padding: padding,
-          decoration: BoxDecoration(
-            color: Colors.white.withValues(alpha: 0.10),
-            borderRadius: BorderRadius.circular(borderRadius),
-            border: Border.all(
-              color: Colors.white.withValues(alpha: 0.15),
-              width: 0.8,
-            ),
-          ),
-          child: child,
-        ),
-      ),
-    );
-  }
-}
-
-// ── Pill button ────────────────────────────────────────────────────────────────
-
-class _PillButton extends StatelessWidget {
-  final IconData icon;
-  final double size;
-  final VoidCallback onTap;
-  final VoidCallback? onLongPress;
-  final String? label;
-
-  const _PillButton({
-    required this.icon,
-    required this.size,
-    required this.onTap,
-    this.onLongPress,
-    this.label,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        borderRadius: BorderRadius.circular(50),
-        onTap: onTap,
-        onLongPress: onLongPress,
+      builder: (ctx) => SafeArea(
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-          child: Row(
+          padding: const EdgeInsets.all(8),
+          child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(icon, color: Colors.white, size: size),
-              if (label != null) ...[
-                const SizedBox(width: 6),
-                ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 90),
-                  child: Text(
-                    label!,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: GoogleFonts.dmSans(
-                      color: Colors.white70,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w500,
-                    ),
+              Padding(
+                padding: const EdgeInsets.all(12),
+                child: Text(
+                  'Choose source',
+                  style: GoogleFonts.bebasNeue(
+                    color: Colors.white,
+                    fontSize: 22,
+                    letterSpacing: 1.2,
                   ),
                 ),
-              ],
+              ),
+              ConstrainedBox(
+                constraints: BoxConstraints(
+                  maxHeight: MediaQuery.sizeOf(context).height * 0.5,
+                ),
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: widget.sources.length,
+                  itemBuilder: (_, i) {
+                    final s = widget.sources[i];
+                    final active = i == _sourceIdx;
+                    return ListTile(
+                      leading: Icon(
+                        active ? Icons.radio_button_checked : Icons.radio_button_off,
+                        color: active ? const Color(0xFF00E5FF) : Colors.white54,
+                      ),
+                      title: Text(
+                        s.label,
+                        style: GoogleFonts.poppins(
+                          color: Colors.white,
+                          fontWeight: active ? FontWeight.w600 : FontWeight.w400,
+                        ),
+                      ),
+                      subtitle: Text(
+                        s.url,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: GoogleFonts.poppins(
+                          color: Colors.white54,
+                          fontSize: 11,
+                        ),
+                      ),
+                      onTap: () {
+                        Navigator.of(ctx).pop();
+                        _switchSource(i);
+                      },
+                    );
+                  },
+                ),
+              ),
             ],
           ),
         ),
@@ -1018,183 +1093,75 @@ class _PillButton extends StatelessWidget {
   }
 }
 
-// ── Source picker sheet ────────────────────────────────────────────────────────
-
-class _SourcePickerSheet extends StatelessWidget {
-  final List<IptvPlaySource> sources;
-  final int activeIdx;
-  final ValueChanged<int> onSelect;
-
-  const _SourcePickerSheet({
-    required this.sources,
-    required this.activeIdx,
-    required this.onSelect,
+class _RoundIcon extends StatelessWidget {
+  final IconData icon;
+  final VoidCallback onTap;
+  final VoidCallback? onLongPress;
+  final bool big;
+  const _RoundIcon({
+    required this.icon,
+    required this.onTap,
+    this.onLongPress,
+    this.big = false,
   });
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: EdgeInsets.only(
-        bottom: MediaQuery.of(context).viewInsets.bottom,
-        left: 16,
-        right: 16,
-        top: 16,
+    final size = big ? 56.0 : 44.0;
+    return Material(
+      color: Colors.white.withValues(alpha: 0.12),
+      shape: const CircleBorder(),
+      child: InkWell(
+        customBorder: const CircleBorder(),
+        onTap: onTap,
+        onLongPress: onLongPress,
+        child: SizedBox(
+          width: size,
+          height: size,
+          child: Icon(icon, color: Colors.white, size: big ? 32 : 22),
+        ),
       ),
-      child: ClipRRect(
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
-        child: BackdropFilter(
-          filter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
-          child: Container(
-            decoration: BoxDecoration(
-              color: Colors.black.withValues(alpha: 0.72),
-              borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
-              border: Border(
-                top: BorderSide(
-                  color: Colors.white.withValues(alpha: 0.12),
-                  width: 0.8,
+    );
+  }
+}
+
+class _SourceChip extends StatelessWidget {
+  final String label;
+  final VoidCallback onTap;
+  const _SourceChip({required this.label, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(20),
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: 0.12),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: const Color(0xFF00E5FF).withValues(alpha: 0.5)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.swap_horiz_rounded,
+                color: Color(0xFF00E5FF), size: 16),
+            const SizedBox(width: 6),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 120),
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: GoogleFonts.poppins(
+                  color: Colors.white,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w500,
                 ),
               ),
             ),
-            child: SafeArea(
-              top: false,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const SizedBox(height: 12),
-                  Container(
-                    width: 36,
-                    height: 4,
-                    decoration: BoxDecoration(
-                      color: Colors.white24,
-                      borderRadius: BorderRadius.circular(2),
-                    ),
-                  ),
-                  const SizedBox(height: 20),
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 20),
-                    child: Row(
-                      children: [
-                        Text(
-                          'Sources',
-                          style: GoogleFonts.dmSans(
-                            color: Colors.white,
-                            fontSize: 18,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                        const Spacer(),
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 10, vertical: 4),
-                          decoration: BoxDecoration(
-                            color: Colors.white.withValues(alpha: 0.08),
-                            borderRadius: BorderRadius.circular(20),
-                          ),
-                          child: Text(
-                            '${sources.length}',
-                            style: GoogleFonts.dmMono(
-                              color: Colors.white54,
-                              fontSize: 12,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  ConstrainedBox(
-                    constraints: BoxConstraints(
-                      maxHeight: MediaQuery.sizeOf(context).height * 0.45,
-                    ),
-                    child: ListView.builder(
-                      shrinkWrap: true,
-                      padding: const EdgeInsets.only(
-                          bottom: 16, left: 12, right: 12),
-                      itemCount: sources.length,
-                      itemBuilder: (_, i) {
-                        final s = sources[i];
-                        final active = i == activeIdx;
-                        return Padding(
-                          padding: const EdgeInsets.only(bottom: 6),
-                          child: Material(
-                            color: Colors.transparent,
-                            child: InkWell(
-                              borderRadius: BorderRadius.circular(16),
-                              onTap: () => onSelect(i),
-                              child: Container(
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 16, vertical: 14),
-                                decoration: BoxDecoration(
-                                  color: active
-                                      ? Colors.white.withValues(alpha: 0.12)
-                                      : Colors.white.withValues(alpha: 0.04),
-                                  borderRadius: BorderRadius.circular(16),
-                                  border: Border.all(
-                                    color: active
-                                        ? Colors.white.withValues(alpha: 0.25)
-                                        : Colors.transparent,
-                                    width: 0.8,
-                                  ),
-                                ),
-                                child: Row(
-                                  children: [
-                                    Container(
-                                      width: 8,
-                                      height: 8,
-                                      decoration: BoxDecoration(
-                                        shape: BoxShape.circle,
-                                        color: active
-                                            ? Colors.white
-                                            : Colors.white24,
-                                      ),
-                                    ),
-                                    const SizedBox(width: 14),
-                                    Expanded(
-                                      child: Column(
-                                        crossAxisAlignment:
-                                            CrossAxisAlignment.start,
-                                        children: [
-                                          Text(
-                                            s.label,
-                                            style: GoogleFonts.dmSans(
-                                              color: active
-                                                  ? Colors.white
-                                                  : Colors.white70,
-                                              fontWeight: active
-                                                  ? FontWeight.w600
-                                                  : FontWeight.w400,
-                                              fontSize: 14,
-                                            ),
-                                          ),
-                                          const SizedBox(height: 2),
-                                          Text(
-                                            s.url,
-                                            maxLines: 1,
-                                            overflow: TextOverflow.ellipsis,
-                                            style: GoogleFonts.dmMono(
-                                              color: Colors.white30,
-                                              fontSize: 10,
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    ),
-                                    if (active)
-                                      const Icon(Icons.check_rounded,
-                                          color: Colors.white, size: 18),
-                                  ],
-                                ),
-                              ),
-                            ),
-                          ),
-                        );
-                      },
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
+          ],
         ),
       ),
     );
