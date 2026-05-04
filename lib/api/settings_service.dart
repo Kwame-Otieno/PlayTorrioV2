@@ -142,6 +142,43 @@ class SettingsService {
     await prefs.setBool(_streamingModeKey, enabled);
   }
 
+  // ── Streaming-mode provider order ─────────────────────────────────────────
+  // Order in which Direct Streaming Mode tries each provider. The first
+  // provider that yields a working stream wins; the rest become fallbacks
+  // inside the player (in the same order). User-editable in Settings.
+  static const String _streamProviderOrderKey = 'stream_provider_order';
+  static const List<String> defaultStreamProviderOrder = <String>[
+    'videasy',
+    'vidlink',
+    'vidsrc',
+    'vixsrc',
+    'vidnest',
+    'service111477',
+    'webstreamr',
+  ];
+
+  Future<List<String>> getStreamProviderOrder() async {
+    final prefs = await SharedPreferences.getInstance();
+    final saved = prefs.getStringList(_streamProviderOrderKey);
+    if (saved == null || saved.isEmpty) {
+      return List<String>.from(defaultStreamProviderOrder);
+    }
+    // Preserve user order, then append any newly-added providers we didn't
+    // know about when the order was first saved.
+    final out = <String>[
+      ...saved.where((k) => defaultStreamProviderOrder.contains(k)),
+    ];
+    for (final k in defaultStreamProviderOrder) {
+      if (!out.contains(k)) out.add(k);
+    }
+    return out;
+  }
+
+  Future<void> setStreamProviderOrder(List<String> order) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList(_streamProviderOrderKey, order);
+  }
+
   Future<String> getSortPreference() async {
     final prefs = await SharedPreferences.getInstance();
     return prefs.getString(_sortPreferenceKey) ?? 'Seeders (High to Low)';
@@ -343,6 +380,11 @@ class SettingsService {
   // ═══════════════════════════════════════════════════════════════════════════
 
   static const String _navbarConfigKey = 'navbar_config';
+  /// Tracks every nav ID the user has already been shown in the configurator,
+  /// so we can distinguish "user explicitly hid it" from "new ID we just
+  /// shipped". Without this, hidden items reappear on every load because the
+  /// merge logic treats any missing ID as new.
+  static const String _navbarKnownIdsKey = 'navbar_known_ids';
 
   /// Notifier that fires when navbar config changes so MainScreen rebuilds.
   static final ValueNotifier<int> navbarChangeNotifier = ValueNotifier<int>(0);
@@ -359,17 +401,26 @@ class SettingsService {
   Future<List<String>> getNavbarConfig() async {
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getStringList(_navbarConfigKey);
-    if (raw == null) return List.from(allNavIds); // default: all visible
-    // Filter out any stale IDs that no longer exist
+    if (raw == null) {
+      // First launch — everything visible, mark all current IDs as known.
+      await prefs.setStringList(_navbarKnownIdsKey, List.from(allNavIds));
+      return List.from(allNavIds);
+    }
+    // Drop any stale IDs (removed from `allNavIds` since last save).
     final filtered = raw.where((id) => allNavIds.contains(id)).toList();
-    // Auto-insert any new nav IDs added since last save so newly shipped
-    // tabs (e.g. anime_arabic, similar) become visible at their default
-    // position rather than being shoved to the end.
+
+    // Only auto-insert IDs the user has never been shown. Anything in the
+    // known-IDs set that's missing from `filtered` was deliberately hidden
+    // and must stay hidden.
+    final known = (prefs.getStringList(_navbarKnownIdsKey) ?? const <String>[])
+        .toSet();
+    final newlyAdded = <String>[];
     for (var i = 0; i < allNavIds.length; i++) {
       final id = allNavIds[i];
       if (filtered.contains(id)) continue;
-      // Find the nearest preceding default-order id that's already in
-      // `filtered` and insert right after it. Falls back to end.
+      if (known.contains(id)) continue; // user hid it on purpose
+      newlyAdded.add(id);
+      // Insert near its default neighbour for stable ordering.
       var insertAt = filtered.length;
       for (var j = i - 1; j >= 0; j--) {
         final idx = filtered.indexOf(allNavIds[j]);
@@ -380,6 +431,11 @@ class SettingsService {
       }
       filtered.insert(insertAt, id);
     }
+
+    // Persist updated known-IDs set so we don't keep re-adding these.
+    if (newlyAdded.isNotEmpty || known.length != allNavIds.length) {
+      await prefs.setStringList(_navbarKnownIdsKey, List.from(allNavIds));
+    }
     return filtered;
   }
 
@@ -387,6 +443,9 @@ class SettingsService {
   Future<void> setNavbarConfig(List<String> visibleIds) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setStringList(_navbarConfigKey, visibleIds);
+    // Mark every current ID as "known" so anything the user hid in this save
+    // stays hidden on the next load.
+    await prefs.setStringList(_navbarKnownIdsKey, List.from(allNavIds));
     navbarChangeNotifier.value++;
   }
 

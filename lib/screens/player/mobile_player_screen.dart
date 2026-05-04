@@ -23,6 +23,8 @@ import '../../api/trakt_service.dart';
 import '../../api/simkl_service.dart';
 import '../../api/torrent_stream_service.dart';
 import '../../api/stream_extractor.dart';
+import '../../api/videasy_extractor.dart';
+import '../../api/vidsrc_extractor.dart';
 import '../../api/webstreamr_service.dart';
 import '../../api/site111477_service.dart';
 import '../../api/site111477_proxy.dart' as site111477_proxy;
@@ -37,6 +39,7 @@ import '../../api/tmdb_service.dart';
 import '../../api/introdb_service.dart';
 import '../../models/movie.dart';
 import '../../models/stream_source.dart';
+import '../../utils/hls_master_parser.dart';
 import '../player_screen.dart';
 import 'utils.dart';
 import 'menus.dart';
@@ -488,6 +491,14 @@ class _MobilePlayerScreenState extends State<MobilePlayerScreen>
   String? _currentProvider;
   List<StreamSource>? _currentSources;
   String? _currentUrl;
+  // ── HLS Quality Selector ─────────────────────────────────────────────────
+  // Populated when the playing URL is a master HLS playlist with 2+
+  // variants. The gear button in the top control bar is hidden until this
+  // notifier holds a non-empty list.
+  final ValueNotifier<List<HlsQuality>?> _hlsQualitiesNotifier = ValueNotifier(null);
+  String? _hlsMasterUrl;
+  Map<String, String>? _hlsMasterHeaders;
+  String? _currentQualityUrl;
   /// For provider == 'service111477', the upstream fileUrl currently playing
   /// (the menu compares against this rather than the localhost proxy URL).
   String? _current111477FileUrl;
@@ -679,6 +690,7 @@ class _MobilePlayerScreenState extends State<MobilePlayerScreen>
     _bufferedNotifier.dispose();
     _isPlayingNotifier.dispose();
     _isBufferingNotifier.dispose();
+    _hlsQualitiesNotifier.dispose();
 
     _player.dispose();
 
@@ -922,6 +934,7 @@ class _MobilePlayerScreenState extends State<MobilePlayerScreen>
             if (ref != null) await (_player.platform as NativePlayer).setProperty('referrer', ref);
           }
           _player.setVolume(_volume);
+          _detectHlsQualities(openUrl, srcHeaders);
           setState(() {
             _currentUrl = openUrl;
           });
@@ -945,6 +958,7 @@ class _MobilePlayerScreenState extends State<MobilePlayerScreen>
           await _configureMpvProperties();
           await _player.open(Media(widget.mediaPath, httpHeaders: widget.headers));
           _player.setVolume(_volume);
+          _detectHlsQualities(widget.mediaPath, widget.headers);
           return;
         } catch (e) {
           retryCount++;
@@ -1034,6 +1048,32 @@ class _MobilePlayerScreenState extends State<MobilePlayerScreen>
           streamUrl = webStreamrSources.first.url;
           sources = webStreamrSources;
         }
+      } else if (newProvider == 'videasy' && widget.movie != null) {
+        final ve = VideasyExtractor(onLog: (m) => debugPrint(m));
+        final result = await ve.extract(
+          tmdbId: widget.movie!.id.toString(),
+          isMovie: widget.movie!.mediaType == 'movie',
+          season: widget.selectedSeason,
+          episode: widget.selectedEpisode,
+        );
+        if (result != null && result.url.isNotEmpty) {
+          streamUrl = result.url;
+          headers = result.headers;
+          sources = result.sources;
+        }
+      } else if (newProvider == 'vidsrc' && widget.movie != null) {
+        final ve = VidsrcExtractor();
+        final result = await ve.extract(
+          tmdbId: widget.movie!.id.toString(),
+          isMovie: widget.movie!.mediaType == 'movie',
+          season: widget.selectedSeason,
+          episode: widget.selectedEpisode,
+        );
+        if (result != null && result.url.isNotEmpty) {
+          streamUrl = result.url;
+          headers = result.headers;
+          sources = result.sources;
+        }
       } else if (provider['movie'] != null && provider['tv'] != null) {
         final String providerUrl;
         if (widget.movie!.mediaType == 'tv') {
@@ -1057,8 +1097,15 @@ class _MobilePlayerScreenState extends State<MobilePlayerScreen>
       
       if (streamUrl != null && streamUrl.isNotEmpty) {
         final currentPos = _positionNotifier.value;
+        // Reset any stale mpv referrer set by the previous provider/quality
+        // selection — then re-apply from the new headers if present.
+        if (_player.platform is NativePlayer) {
+          final ref = headers?['Referer'] ?? headers?['referer'] ?? '';
+          await (_player.platform as NativePlayer).setProperty('referrer', ref);
+        }
         await _player.open(Media(streamUrl, httpHeaders: headers));
         if (currentPos.inSeconds > 0) await _player.seek(currentPos);
+        _detectHlsQualities(streamUrl, headers);
         
         setState(() {
           _currentProvider = newProvider;
@@ -2221,6 +2268,124 @@ class _MobilePlayerScreenState extends State<MobilePlayerScreen>
   }
 
   // ─────────────────────────────────────────────────────────────────────────
+  //  HLS QUALITY SELECTOR
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /// Probe [url] as a master HLS playlist. Populates the quality notifier
+  /// when 2+ variants are present, otherwise clears it (hiding the gear).
+  void _detectHlsQualities(String url, Map<String, String>? headers) {
+    _currentQualityUrl = url;
+    if (!url.contains('.m3u8')) {
+      _hlsMasterUrl = null;
+      _hlsMasterHeaders = null;
+      _hlsQualitiesNotifier.value = null;
+      return;
+    }
+    // If the user just picked a variant from the same master, keep the list.
+    final existing = _hlsQualitiesNotifier.value;
+    if (existing != null && existing.any((q) => q.url == url)) return;
+
+    // New stream — clear any prior quality state immediately so the gear
+    // doesn't expose stale variants while the new master loads.
+    _hlsMasterUrl = url;
+    _hlsMasterHeaders = headers;
+    _hlsQualitiesNotifier.value = null;
+    fetchHlsQualities(url, headers: headers).then((qs) {
+      if (_disposed) return;
+      // Only apply if a newer URL didn't take over while we were fetching.
+      if (_hlsMasterUrl != url) return;
+      _hlsQualitiesNotifier.value = qs;
+    });
+  }
+
+  void _showQualityMenu() {
+    final qs = _hlsQualitiesNotifier.value;
+    if (qs == null || qs.length < 2) return;
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF0E0E0E),
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (context) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Container(
+            width: 40, height: 4,
+            margin: const EdgeInsets.symmetric(vertical: 10),
+            decoration: BoxDecoration(
+                color: Colors.white24,
+                borderRadius: BorderRadius.circular(2)),
+          ),
+          const Padding(
+            padding: EdgeInsets.all(16),
+            child: Text('Quality',
+                style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold)),
+          ),
+          Flexible(
+            child: ListView.builder(
+              shrinkWrap: true,
+              itemCount: qs.length,
+              itemBuilder: (context, i) {
+                final q = qs[i];
+                final isCurrent = q.url == _currentQualityUrl;
+                return ListTile(
+                  leading: Icon(
+                    q.isAuto ? Icons.auto_awesome_outlined : Icons.high_quality_outlined,
+                    color: isCurrent ? const Color(0xFF7C3AED) : Colors.white70,
+                  ),
+                  title: Text(
+                    q.label,
+                    style: TextStyle(
+                      color: isCurrent ? const Color(0xFF7C3AED) : Colors.white,
+                      fontWeight: isCurrent ? FontWeight.bold : FontWeight.normal,
+                    ),
+                  ),
+                  subtitle: q.bandwidth != null
+                      ? Text(
+                          '${(q.bandwidth! / 1000).round()} kbps',
+                          style: TextStyle(
+                            color: isCurrent
+                                ? const Color(0xFF7C3AED).withValues(alpha: 0.7)
+                                : Colors.white54,
+                            fontSize: 11,
+                          ),
+                        )
+                      : null,
+                  trailing: isCurrent
+                      ? const Icon(Icons.check, color: Color(0xFF7C3AED))
+                      : null,
+                  onTap: () async {
+                    Navigator.pop(context);
+                    if (isCurrent) return;
+                    final pos = _positionNotifier.value;
+                    _currentQualityUrl = q.url;
+                    if (mounted) setState(() {});
+                    if (_hlsMasterHeaders != null && _player.platform is NativePlayer) {
+                      final ref = _hlsMasterHeaders!['Referer'] ??
+                          _hlsMasterHeaders!['referer'];
+                      if (ref != null) {
+                        await (_player.platform as NativePlayer)
+                            .setProperty('referrer', ref);
+                      }
+                    }
+                    await _player.open(
+                      Media(q.url, httpHeaders: _hlsMasterHeaders),
+                    );
+                    if (pos.inSeconds > 0) await _player.seek(pos);
+                  },
+                );
+              },
+            ),
+          ),
+        ]),
+      ),
+    );
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
   //  SOURCE SELECTION (for Amri provider)
   // ─────────────────────────────────────────────────────────────────────────
 
@@ -2319,6 +2484,7 @@ class _MobilePlayerScreenState extends State<MobilePlayerScreen>
                             _hasError = false;
                             _errorMessage = '';
                           });
+                          _detectHlsQualities(newProxied, null);
                           if (currentPos.inSeconds > 0) {
                             await _player.seek(currentPos);
                           }
@@ -2370,6 +2536,7 @@ class _MobilePlayerScreenState extends State<MobilePlayerScreen>
                           _hasError = false;
                           _errorMessage = '';
                         });
+                        _detectHlsQualities(result.url, result.headers);
                       } else {
                         // Normal direct switch — use per-source headers if available
                         final srcHeaders = source.headers ?? widget.headers;
@@ -2386,6 +2553,7 @@ class _MobilePlayerScreenState extends State<MobilePlayerScreen>
                           _hasError = false;
                           _errorMessage = '';
                         });
+                        _detectHlsQualities(source.url, srcHeaders);
                       }
                       
                       // Seek to saved position
@@ -2530,6 +2698,32 @@ class _MobilePlayerScreenState extends State<MobilePlayerScreen>
           streamUrl = webStreamrSources.first.url;
           sources = webStreamrSources;
         }
+      } else if (newProvider == 'videasy' && widget.movie != null) {
+        final ve = VideasyExtractor(onLog: (m) => debugPrint(m));
+        final result = await ve.extract(
+          tmdbId: widget.movie!.id.toString(),
+          isMovie: widget.movie!.mediaType == 'movie',
+          season: widget.selectedSeason,
+          episode: widget.selectedEpisode,
+        );
+        if (result != null && result.url.isNotEmpty) {
+          streamUrl = result.url;
+          headers = result.headers;
+          sources = result.sources;
+        }
+      } else if (newProvider == 'vidsrc' && widget.movie != null) {
+        final ve = VidsrcExtractor();
+        final result = await ve.extract(
+          tmdbId: widget.movie!.id.toString(),
+          isMovie: widget.movie!.mediaType == 'movie',
+          season: widget.selectedSeason,
+          episode: widget.selectedEpisode,
+        );
+        if (result != null && result.url.isNotEmpty) {
+          streamUrl = result.url;
+          headers = result.headers;
+          sources = result.sources;
+        }
       } else if (provider['movie'] != null && provider['tv'] != null) {
         final String providerUrl;
         if (widget.movie!.mediaType == 'tv') {
@@ -2552,6 +2746,12 @@ class _MobilePlayerScreenState extends State<MobilePlayerScreen>
       }
       
       if (streamUrl != null && streamUrl.isNotEmpty) {
+        // Reset any stale mpv referrer set by the previous provider/quality
+        // selection — then re-apply from the new headers if present.
+        if (_player.platform is NativePlayer) {
+          final ref = headers?['Referer'] ?? headers?['referer'] ?? '';
+          await (_player.platform as NativePlayer).setProperty('referrer', ref);
+        }
         await _player.open(
           Media(streamUrl, httpHeaders: headers),
         );
@@ -2559,6 +2759,7 @@ class _MobilePlayerScreenState extends State<MobilePlayerScreen>
         if (currentPos.inSeconds > 0) {
           await _player.seek(currentPos);
         }
+        _detectHlsQualities(streamUrl, headers);
         
         setState(() {
           _currentProvider = newProvider;
@@ -3356,6 +3557,22 @@ class _MobilePlayerScreenState extends State<MobilePlayerScreen>
                 icon: Icons.subtitles_outlined,
                 onPressed: _showSubtitlesMenu,
                 size: btnSize, iconSize: iconSz,
+              ),
+              // Quality selector — only when the playing stream is a master
+              // HLS playlist with 2+ variants.
+              ValueListenableBuilder<List<HlsQuality>?>(
+                valueListenable: _hlsQualitiesNotifier,
+                builder: (ctx, qs, _) {
+                  if (qs == null || qs.length < 2) return const SizedBox.shrink();
+                  return Row(mainAxisSize: MainAxisSize.min, children: [
+                    SizedBox(width: gap),
+                    _GlassIconButton(
+                      icon: Icons.video_settings_outlined,
+                      onPressed: _showQualityMenu,
+                      size: btnSize, iconSize: iconSz,
+                    ),
+                  ]);
+                },
               ),
               // Show sources button for providers with multiple sources
               if (_currentSources != null && _currentSources!.length > 1) ...[

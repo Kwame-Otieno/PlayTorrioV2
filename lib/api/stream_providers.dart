@@ -31,10 +31,22 @@ class StreamProviders {
       'movie': (tmdbId) => 'https://vidnest.fun/movie/$tmdbId',
       'tv': (tmdbId, s, e) => 'https://vidnest.fun/tv/$tmdbId/$s/$e',
     },
-    '111movies': {
-      'name': '111Movies',
-      'movie': (tmdbId) => 'https://111movies.com/movie/$tmdbId',
-      'tv': (tmdbId, s, e) => 'https://111movies.com/tv/$tmdbId/$s/$e',
+    // Videasy (player.videasy.net) — uses a dedicated extractor that hooks
+    // into the page's own WASM-based decryption pipeline. Special-cased in
+    // the player screens like service111477/webstreamr.
+    'videasy': {
+      'name': 'Videasy',
+      'movie': null,
+      'tv': null,
+    },
+    // Vidsrc (vsembed.ru / vidsrc-embed.ru) — outer embed wraps an inner
+    // cloudnestra iframe that the generic web sniffer can crack. Special-
+    // cased so the player layer calls VidsrcExtractor instead of feeding
+    // the embed URL straight to StreamExtractor.
+    'vidsrc': {
+      'name': 'Vidsrc',
+      'movie': null,
+      'tv': null,
     },
   };
 }

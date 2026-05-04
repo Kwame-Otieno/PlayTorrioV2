@@ -9,6 +9,9 @@ import '../api/stream_providers.dart';
 import '../api/webstreamr_service.dart';
 import '../api/site111477_service.dart';
 import '../api/site111477_proxy.dart' as site111477_proxy;
+import '../api/videasy_extractor.dart';
+import '../api/vidsrc_extractor.dart';
+import '../api/settings_service.dart';
 import '../widgets/loading_overlay.dart';
 import '../services/episode_watched_service.dart';
 import '../widgets/movie_atmosphere.dart';
@@ -64,6 +67,7 @@ class _StreamingDetailsScreenState extends State<StreamingDetailsScreen> with At
   final ScrollController _seasonScrollController = ScrollController();
 
   final Map<String, dynamic> _providers = StreamProviders.providers;
+  final SettingsService _settings = SettingsService();
 
   @override
   void initState() {
@@ -216,163 +220,36 @@ class _StreamingDetailsScreenState extends State<StreamingDetailsScreen> with At
       _statusMessage = 'Initializing Stream Extractor...';
     });
 
+    // Load user-defined provider order. The first provider that yields a
+    // working stream wins; the player uses the rest as fallbacks (in this
+    // same order) when the active source dies.
+    final order = await _settings.getStreamProviderOrder();
+
+    // Build a reordered providers map so the player's fallback loop
+    // (which iterates `widget.providers!.keys`) follows the user's order.
+    final orderedProviders = <String, dynamic>{
+      for (final k in order)
+        if (_providers.containsKey(k)) k: _providers[k],
+      // Append anything in StreamProviders not in the saved order, just in
+      // case a new built-in provider ships before settings are migrated.
+      for (final k in _providers.keys)
+        if (!order.contains(k)) k: _providers[k],
+    };
+
     bool found = false;
-
-    // Top priority: try the 111477.xyz direct-file index.
-    if (!_extractionCancelled) {
-      if (mounted) setState(() => _statusMessage = 'Searching 111477.xyz…');
+    for (final key in orderedProviders.keys) {
+      if (!mounted || _extractionCancelled) break;
+      final provider = orderedProviders[key];
+      final displayName = (provider?['name'] as String?) ?? key;
+      if (mounted) {
+        setState(() => _statusMessage = 'Searching $displayName…');
+      }
       try {
-        final svc = Site111477Service();
-        List<Site111477Match> hits;
-        if (_movie.mediaType == 'tv') {
-          hits = await svc.findEpisodeSources(
-            showTitle: _movie.title,
-            season: _selectedSeason,
-            episode: _selectedEpisode,
-          );
-        } else {
-          final year = _movie.releaseDate.length >= 4
-              ? _movie.releaseDate.substring(0, 4)
-              : null;
-          hits = await svc.findMovieSources(title: _movie.title, year: year);
-        }
-        if (!_extractionCancelled && hits.isNotEmpty) {
-          final hit = hits.first;
-          if (mounted) setState(() => _statusMessage = 'Starting 111477 proxy…');
-          final proxiedUrl = await site111477_proxy.start111477Proxy(hit.fileUrl);
-          if (!_extractionCancelled && mounted) {
-            found = true;
-            if (Navigator.canPop(context)) Navigator.pop(context);
-            Navigator.push(
-              context,
-              MaterialPageRoute(
-                builder: (context) => PlayerScreen(
-                  streamUrl: proxiedUrl,
-                  title: _movie.mediaType == 'tv'
-                      ? '${_movie.title} - S$_selectedSeason E$_selectedEpisode'
-                      : _movie.title,
-                  movie: _movie,
-                  providers: _providers,
-                  activeProvider: 'service111477',
-                  selectedSeason: _movie.mediaType == 'tv' ? _selectedSeason : null,
-                  selectedEpisode: _movie.mediaType == 'tv' ? _selectedEpisode : null,
-                  startPosition: widget.startPosition,
-                  sources: Site111477Service.toStreamSources(hits),
-                ),
-              ),
-            );
-          }
-        }
+        found = await _tryProvider(key, orderedProviders);
       } catch (e) {
-        debugPrint('Error extracting from 111477: $e');
+        debugPrint('Error extracting from $key: $e');
       }
-    }
-
-    // Secondary: try the local WebStreamr port.
-    if (!found && !_extractionCancelled && _movie.imdbId != null && _movie.imdbId!.isNotEmpty) {
-      if (mounted) setState(() => _statusMessage = 'Searching WebStreamr…');
-      try {
-        final webStreamr = WebStreamrService();
-        final isMovie = _movie.mediaType != 'tv';
-        final wsSources = await webStreamr.getStreams(
-          imdbId: _movie.imdbId!,
-          isMovie: isMovie,
-          season: isMovie ? null : _selectedSeason,
-          episode: isMovie ? null : _selectedEpisode,
-          tmdbId: _movie.id,
-        );
-        if (!_extractionCancelled && wsSources.isNotEmpty) {
-          found = true;
-          if (mounted && !_extractionCancelled) {
-            if (Navigator.canPop(context)) Navigator.pop(context);
-            final first = wsSources.first;
-            Navigator.push(
-              context,
-              MaterialPageRoute(
-                builder: (context) => PlayerScreen(
-                  streamUrl: first.url,
-                  title: _movie.mediaType == 'tv'
-                      ? '${_movie.title} - S$_selectedSeason E$_selectedEpisode'
-                      : _movie.title,
-                  headers: first.headers,
-                  movie: _movie,
-                  providers: _providers,
-                  activeProvider: 'webstreamr',
-                  selectedSeason: _movie.mediaType == 'tv' ? _selectedSeason : null,
-                  selectedEpisode: _movie.mediaType == 'tv' ? _selectedEpisode : null,
-                  startPosition: widget.startPosition,
-                  sources: wsSources,
-                ),
-              ),
-            );
-          }
-        }
-      } catch (e) {
-        debugPrint('Error extracting from WebStreamr: $e');
-      }
-    }
-
-    // Fallback: web embeds (VidLink/etc.) if WebStreamr returned nothing.
-    if (!found) {
-      final providerKeys = _providers.keys.toList();
-
-      for (var key in providerKeys) {
-        if (!mounted || _extractionCancelled) break;
-
-        final provider = _providers[key];
-
-        // Skip service-style providers (no embed URL builder) — they're
-        // handled by their own dedicated paths above.
-        if (provider['movie'] == null || provider['tv'] == null) continue;
-
-        final String url;
-        if (_movie.mediaType == 'tv') {
-          url = provider['tv'](
-            widget.movie.id.toString(),
-            _selectedSeason.toString(),
-            _selectedEpisode.toString(),
-          );
-        } else {
-          url = provider['movie'](widget.movie.id.toString());
-        }
-        
-        setState(() => _statusMessage = 'Searching ${provider['name']}...');
-        debugPrint('[StreamExtractor] Trying ${provider['name']} source: $url');
-
-        try {
-          var result = await _extractor.extract(url, timeout: const Duration(seconds: 5));
-          if (_extractionCancelled) break;
-          if (result != null) {
-            found = true;
-            if (mounted && !_extractionCancelled) {
-              if (Navigator.canPop(context)) Navigator.pop(context);
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (context) => PlayerScreen(
-                    streamUrl: result.url,
-                    audioUrl: result.audioUrl,
-                    title: _movie.mediaType == 'tv' 
-                        ? '${_movie.title} - S$_selectedSeason E$_selectedEpisode' 
-                        : _movie.title,
-                    headers: result.headers,
-                    movie: _movie,
-                    providers: _providers,
-                    activeProvider: key,
-                    selectedSeason: _movie.mediaType == 'tv' ? _selectedSeason : null,
-                    selectedEpisode: _movie.mediaType == 'tv' ? _selectedEpisode : null,
-                    startPosition: widget.startPosition,
-                    sources: result.sources,
-                  ),
-                ),
-              );
-            }
-            break;
-          }
-        } catch (e) {
-          debugPrint('Error extracting from $key: $e');
-        }
-      }
+      if (found) break;
     }
 
     if (mounted) {
@@ -389,6 +266,167 @@ class _StreamingDetailsScreenState extends State<StreamingDetailsScreen> with At
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Failed to find a working stream.')));
       }
     }
+  }
+
+  /// Tries a single provider by key. Returns true if a stream was found and
+  /// the PlayerScreen was pushed; false otherwise. Always passes
+  /// [orderedProviders] (not the static map) so the player's auto-fallback
+  /// honours the user's preferred order.
+  Future<bool> _tryProvider(
+      String key, Map<String, dynamic> orderedProviders) async {
+    final isTv = _movie.mediaType == 'tv';
+    final title = isTv
+        ? '${_movie.title} - S$_selectedSeason E$_selectedEpisode'
+        : _movie.title;
+
+    void pushPlayer({
+      required String streamUrl,
+      String? audioUrl,
+      Map<String, String>? headers,
+      List<dynamic>? sources,
+      List<Map<String, dynamic>>? subtitles,
+    }) {
+      if (Navigator.canPop(context)) Navigator.pop(context);
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (context) => PlayerScreen(
+            streamUrl: streamUrl,
+            audioUrl: audioUrl,
+            title: title,
+            headers: headers,
+            movie: _movie,
+            providers: orderedProviders,
+            activeProvider: key,
+            selectedSeason: isTv ? _selectedSeason : null,
+            selectedEpisode: isTv ? _selectedEpisode : null,
+            startPosition: widget.startPosition,
+            sources: sources?.cast(),
+            externalSubtitles: subtitles,
+          ),
+        ),
+      );
+    }
+
+    if (key == 'service111477') {
+      final svc = Site111477Service();
+      List<Site111477Match> hits;
+      if (isTv) {
+        hits = await svc.findEpisodeSources(
+          showTitle: _movie.title,
+          season: _selectedSeason,
+          episode: _selectedEpisode,
+        );
+      } else {
+        final year = _movie.releaseDate.length >= 4
+            ? _movie.releaseDate.substring(0, 4)
+            : null;
+        hits = await svc.findMovieSources(title: _movie.title, year: year);
+      }
+      if (_extractionCancelled || hits.isEmpty) return false;
+      if (mounted) setState(() => _statusMessage = 'Starting 111477 proxy…');
+      final proxiedUrl =
+          await site111477_proxy.start111477Proxy(hits.first.fileUrl);
+      if (_extractionCancelled || !mounted) return false;
+      pushPlayer(
+        streamUrl: proxiedUrl,
+        sources: Site111477Service.toStreamSources(hits),
+      );
+      return true;
+    }
+
+    if (key == 'webstreamr') {
+      if (_movie.imdbId == null || _movie.imdbId!.isEmpty) return false;
+      final ws = WebStreamrService();
+      final wsSources = await ws.getStreams(
+        imdbId: _movie.imdbId!,
+        isMovie: !isTv,
+        season: isTv ? _selectedSeason : null,
+        episode: isTv ? _selectedEpisode : null,
+        tmdbId: _movie.id,
+      );
+      if (_extractionCancelled || wsSources.isEmpty) return false;
+      if (!mounted) return false;
+      final first = wsSources.first;
+      pushPlayer(
+        streamUrl: first.url,
+        headers: first.headers,
+        sources: wsSources,
+      );
+      return true;
+    }
+
+    if (key == 'videasy') {
+      final ve = VideasyExtractor(onLog: (m) => debugPrint(m));
+      final result = await ve.extract(
+        tmdbId: _movie.id.toString(),
+        isMovie: !isTv,
+        season: isTv ? _selectedSeason : null,
+        episode: isTv ? _selectedEpisode : null,
+      );
+      if (_extractionCancelled || result == null || result.url.isEmpty) {
+        return false;
+      }
+      if (!mounted) return false;
+      pushPlayer(
+        streamUrl: result.url,
+        audioUrl: result.audioUrl,
+        headers: result.headers,
+        sources: result.sources,
+        subtitles: result.externalSubtitles,
+      );
+      return true;
+    }
+
+    if (key == 'vidsrc') {
+      final ve = VidsrcExtractor();
+      final result = await ve.extract(
+        tmdbId: _movie.id.toString(),
+        isMovie: !isTv,
+        season: isTv ? _selectedSeason : null,
+        episode: isTv ? _selectedEpisode : null,
+      );
+      if (_extractionCancelled || result == null || result.url.isEmpty) {
+        return false;
+      }
+      if (!mounted) return false;
+      pushPlayer(
+        streamUrl: result.url,
+        audioUrl: result.audioUrl,
+        headers: result.headers,
+        sources: result.sources,
+        subtitles: result.externalSubtitles,
+      );
+      return true;
+    }
+
+    // Generic web-embed providers (vidlink/vixsrc/vidnest/…).
+    final provider = orderedProviders[key];
+    if (provider == null ||
+        provider['movie'] == null ||
+        provider['tv'] == null) {
+      return false;
+    }
+    final String url = isTv
+        ? provider['tv'](
+            _movie.id.toString(),
+            _selectedSeason.toString(),
+            _selectedEpisode.toString(),
+          )
+        : provider['movie'](_movie.id.toString());
+    debugPrint('[StreamExtractor] Trying ${provider['name']} source: $url');
+    final result =
+        await _extractor.extract(url, timeout: const Duration(seconds: 5));
+    if (_extractionCancelled || result == null) return false;
+    if (!mounted) return false;
+    pushPlayer(
+      streamUrl: result.url,
+      audioUrl: result.audioUrl,
+      headers: result.headers,
+      sources: result.sources,
+      subtitles: result.externalSubtitles,
+    );
+    return true;
   }
 
   // ═══════════════════════════════════════════════════════════════════════════

@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../api/settings_service.dart';
+import '../api/stream_providers.dart';
 import '../api/stremio_service.dart';
 import '../api/torrent_stream_service.dart';
 import '../services/external_player_service.dart';
@@ -112,6 +113,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   List<String> _navbarVisible = [];
   List<String> _navbarOrder = [];
 
+  // Stream provider order (Direct Streaming Mode)
+  List<String> _streamProviderOrder = [];
+
   @override
   void initState() {
     super.initState();
@@ -185,6 +189,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final hidden = allIds.where((id) => !navVisible.contains(id)).toList();
     final navOrder = [...navVisible, ...hidden];
 
+    // Load stream provider order
+    final streamOrder = await _settings.getStreamProviderOrder();
+
     if (mounted) {
       setState(() {
         _isStreamingMode = streaming;
@@ -224,6 +231,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _selectedThemeId = themePreset;
         _navbarVisible = navVisible;
         _navbarOrder = navOrder;
+        _streamProviderOrder = streamOrder;
       });
     }
     if ((prowlarrUrl?.isNotEmpty ?? false) && (prowlarrKey?.isNotEmpty ?? false)) {
@@ -388,6 +396,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             setState(() => _isStreamingMode = val);
                           },
                         ),
+                        _buildStreamProviderOrder(),
                         _buildFocusableDropdown(
                           'Video Player',
                           'Choose which player opens videos.',
@@ -635,7 +644,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     const SizedBox(height: 40),
                     const Center(
                       child: Text(
-                        'PlayTorrio Native v1.2.8',
+                        'PlayTorrio Native v1.2.9',
                         style: TextStyle(color: Colors.white24, fontSize: 12, letterSpacing: 2, fontWeight: FontWeight.bold),
                       ),
                     ),
@@ -2723,6 +2732,102 @@ class _SettingsScreenState extends State<SettingsScreen> {
           },
         ),
       ],
+    );
+  }
+
+  Widget _buildStreamProviderOrder() {
+    final providers = StreamProviders.providers;
+    final order = <String>[
+      ..._streamProviderOrder.where(providers.containsKey),
+    ];
+    for (final k in providers.keys) {
+      if (!order.contains(k)) order.add(k);
+    }
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('Provider Order',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 4),
+          const Text(
+            'Order in which Direct Streaming Mode tries each provider. The '
+            'first one that works wins; the rest become in-player fallbacks.',
+            style: TextStyle(fontSize: 13, color: Colors.white54),
+          ),
+          const SizedBox(height: 12),
+          Container(
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: 0.04),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: ReorderableListView.builder(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              buildDefaultDragHandles: false,
+              itemCount: order.length,
+              onReorder: (oldIndex, newIndex) async {
+                if (newIndex > oldIndex) newIndex -= 1;
+                final item = order.removeAt(oldIndex);
+                order.insert(newIndex, item);
+                setState(() => _streamProviderOrder = List<String>.from(order));
+                await _settings.setStreamProviderOrder(order);
+              },
+              itemBuilder: (context, i) {
+                final key = order[i];
+                final name = (providers[key]?['name'] as String?) ?? key;
+                return ListTile(
+                  key: ValueKey(key),
+                  leading: Container(
+                    width: 28,
+                    height: 28,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: AppTheme.current.primaryColor.withValues(alpha: 0.18),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Text(
+                      '${i + 1}',
+                      style: TextStyle(
+                        color: AppTheme.current.primaryColor,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                  title: Text(name,
+                      style: const TextStyle(
+                          color: Colors.white, fontWeight: FontWeight.w600)),
+                  subtitle: Text(key,
+                      style: const TextStyle(color: Colors.white38, fontSize: 11)),
+                  trailing: ReorderableDragStartListener(
+                    index: i,
+                    child: const Icon(Icons.drag_handle_rounded, color: Colors.white54),
+                  ),
+                );
+              },
+            ),
+          ),
+          const SizedBox(height: 8),
+          Align(
+            alignment: Alignment.centerRight,
+            child: TextButton.icon(
+              onPressed: () async {
+                final defaults = List<String>.from(
+                    SettingsService.defaultStreamProviderOrder);
+                await _settings.setStreamProviderOrder(defaults);
+                setState(() => _streamProviderOrder = defaults);
+              },
+              icon: const Icon(Icons.restore_rounded, size: 16),
+              label: const Text('Reset to default'),
+              style: TextButton.styleFrom(
+                foregroundColor: AppTheme.current.primaryColor,
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
