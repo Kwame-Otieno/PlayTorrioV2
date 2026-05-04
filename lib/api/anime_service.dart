@@ -95,7 +95,7 @@ class AnimeService {
     final q = '''
       query (\$page: Int, \$perPage: Int) {
         Page(page: \$page, perPage: \$perPage) {
-          media(type: ANIME, sort: [${sort}], isAdult: false$filter) {
+          media(type: ANIME, sort: [$sort], isAdult: false$filter) {
             $_mediaFields
           }
         }

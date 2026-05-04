@@ -39,7 +39,12 @@ class _HoverScaleState extends State<HoverScale> {
           duration: const Duration(milliseconds: 180),
           curve: Curves.easeOutCubic,
           transform: Matrix4.identity()
-            ..scale(_hover ? widget.scale : 1.0),
+            ..scaleByDouble(
+              _hover ? widget.scale : 1.0,
+              _hover ? widget.scale : 1.0,
+              1.0,
+              1.0,
+            ),
           transformAlignment: Alignment.center,
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(widget.radius),

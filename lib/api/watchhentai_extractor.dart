@@ -11,8 +11,8 @@ import 'package:flutter/foundation.dart';
 ///   2. Score each (title, url) result vs every candidate title using
 ///      a stopword-filtered Jaccard similarity. Best score wins;
 ///      threshold 0.50 to reject WordPress's body-content false matches.
-///   3. GET /series/<slug>/      → find /videos/<slug>-episode-N-…
-///   4. GET /videos/<ep-slug>/   → regex jwplayer iframe → direct MP4
+///   3. GET `/series/<slug>/`      → find `/videos/<slug>-episode-N-…`
+///   4. GET `/videos/<ep-slug>/`   → regex jwplayer iframe → direct MP4
 class WatchHentaiResult {
   final String url;
   final String referer;

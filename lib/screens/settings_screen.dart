@@ -635,7 +635,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     const SizedBox(height: 40),
                     const Center(
                       child: Text(
-                        'PlayTorrio Native v1.2.7',
+                        'PlayTorrio Native v1.2.8',
                         style: TextStyle(color: Colors.white24, fontSize: 12, letterSpacing: 2, fontWeight: FontWeight.bold),
                       ),
                     ),
@@ -925,6 +925,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   static const Map<String, Map<String, dynamic>> _navMeta = {
     'home':         {'icon': Icons.home,                       'label': 'Home'},
     'discover':     {'icon': Icons.explore,                    'label': 'Discover'},
+    'similar':      {'icon': Icons.auto_awesome,               'label': 'Similar'},
     'search':       {'icon': Icons.search,                     'label': 'Search'},
     'mylist':       {'icon': Icons.bookmark,                   'label': 'My List'},
     'magnet':       {'icon': Icons.link_rounded,               'label': 'Magnet'},
@@ -937,6 +938,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     'manga':        {'icon': Icons.book,                       'label': 'Manga'},
     'jellyfin':     {'icon': Icons.dns_rounded,                'label': 'Jellyfin'},
     'anime':        {'icon': Icons.play_circle_filled,         'label': 'Anime'},
+    'anime_arabic': {'icon': Icons.subtitles,                  'label': 'Anime Arabic'},
+    'asian_drama':  {'icon': Icons.theater_comedy,             'label': 'Asian Drama'},
     'arabic':       {'icon': Icons.movie_filter,               'label': 'Arabic'},
   };
 

@@ -3,7 +3,6 @@
 
 import 'dart:ui';
 import 'package:cached_network_image/cached_network_image.dart';
-import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter/material.dart';
 
 import '../api/anime_service.dart';
@@ -147,6 +146,7 @@ class _AnimeDetailsScreenState extends State<AnimeDetailsScreen> {
     );
   }
 
+  // ignore: unused_element
   Future<void> _toggleLike() async {
     await _service.toggleLike(_data);
     if (!mounted) return;
@@ -169,7 +169,7 @@ class _AnimeDetailsScreenState extends State<AnimeDetailsScreen> {
   Widget build(BuildContext context) {
     return ValueListenableBuilder<AppThemePreset>(
       valueListenable: AppTheme.themeNotifier,
-      builder: (context, _, __) {
+      builder: (context, _, _) {
         return Scaffold(
           backgroundColor: AppTheme.bgDark,
           body: _error != null
@@ -199,8 +199,8 @@ class _AnimeDetailsScreenState extends State<AnimeDetailsScreen> {
               imageUrl: url,
               fit: BoxFit.cover,
               alignment: Alignment.topCenter,
-              placeholder: (_, __) => Container(color: AppTheme.bgCard),
-              errorWidget: (_, __, ___) => Container(color: AppTheme.bgCard),
+              placeholder: (_, _) => Container(color: AppTheme.bgCard),
+              errorWidget: (_, _, _) => Container(color: AppTheme.bgCard),
             ),
           ),
           // Tint so text/cards remain readable
@@ -919,7 +919,7 @@ class _AnimeDetailsScreenState extends State<AnimeDetailsScreen> {
         child: HorizontalScroller(
           height: 36,
           itemCount: _seasons.length,
-          separatorBuilder: (_, __) => const SizedBox(width: 8),
+          separatorBuilder: (_, _) => const SizedBox(width: 8),
           itemBuilder: (_, i) {
             final s = _seasons[i];
             final selected = s.id == currentId;
@@ -1039,7 +1039,7 @@ class _AnimeDetailsScreenState extends State<AnimeDetailsScreen> {
             height: 280,
             padding: const EdgeInsets.symmetric(horizontal: 24),
             itemCount: _related.length,
-            separatorBuilder: (_, __) => const SizedBox(width: 12),
+            separatorBuilder: (_, _) => const SizedBox(width: 12),
             itemBuilder: (_, i) {
               final r = _related[i];
               return HoverScale(

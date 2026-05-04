@@ -349,9 +349,9 @@ class SettingsService {
 
   /// All available nav items in default order. 'settings' is always last and locked.
   static const List<String> allNavIds = [
-    'home', 'discover', 'search', 'mylist', 'magnet', 'live_matches',
+    'home', 'discover', 'similar', 'search', 'mylist', 'magnet', 'live_matches',
     'iptv', 'audiobooks', 'books', 'music', 'comics', 'manga',
-    'jellyfin', 'anime', 'arabic',
+    'jellyfin', 'anime', 'anime_arabic', 'asian_drama', 'arabic',
   ];
 
   /// Returns the ordered list of visible nav item IDs.
@@ -361,7 +361,26 @@ class SettingsService {
     final raw = prefs.getStringList(_navbarConfigKey);
     if (raw == null) return List.from(allNavIds); // default: all visible
     // Filter out any stale IDs that no longer exist
-    return raw.where((id) => allNavIds.contains(id)).toList();
+    final filtered = raw.where((id) => allNavIds.contains(id)).toList();
+    // Auto-insert any new nav IDs added since last save so newly shipped
+    // tabs (e.g. anime_arabic, similar) become visible at their default
+    // position rather than being shoved to the end.
+    for (var i = 0; i < allNavIds.length; i++) {
+      final id = allNavIds[i];
+      if (filtered.contains(id)) continue;
+      // Find the nearest preceding default-order id that's already in
+      // `filtered` and insert right after it. Falls back to end.
+      var insertAt = filtered.length;
+      for (var j = i - 1; j >= 0; j--) {
+        final idx = filtered.indexOf(allNavIds[j]);
+        if (idx >= 0) {
+          insertAt = idx + 1;
+          break;
+        }
+      }
+      filtered.insert(insertAt, id);
+    }
+    return filtered;
   }
 
   /// Save the ordered list of visible nav item IDs (excluding 'settings').

@@ -299,7 +299,7 @@ class _AnimeScreenState extends State<AnimeScreen>
     super.build(context);
     return ValueListenableBuilder<AppThemePreset>(
       valueListenable: AppTheme.themeNotifier,
-      builder: (context, _, __) {
+      builder: (context, _, _) {
         return Scaffold(
           backgroundColor: AppTheme.bgDark,
           body: _loading
@@ -574,8 +574,8 @@ class _AnimeScreenState extends State<AnimeScreen>
             imageUrl: a.bannerOrCover,
             fit: BoxFit.cover,
             alignment: Alignment.topCenter,
-            placeholder: (_, __) => Container(color: AppTheme.bgCard),
-            errorWidget: (_, __, ___) => Container(color: AppTheme.bgCard),
+            placeholder: (_, _) => Container(color: AppTheme.bgCard),
+            errorWidget: (_, _, _) => Container(color: AppTheme.bgCard),
           ),
         // Gradient overlay
         Container(
@@ -824,7 +824,7 @@ class _AnimeScreenState extends State<AnimeScreen>
             physics: const BouncingScrollPhysics(),
             padding: EdgeInsets.symmetric(horizontal: hPad),
             itemCount: _continueWatching.length,
-            separatorBuilder: (_, __) => const SizedBox(width: 14),
+            separatorBuilder: (_, _) => const SizedBox(width: 14),
             itemBuilder: (_, i) {
               final entry = _continueWatching[i];
               final animeJson =
@@ -955,7 +955,7 @@ class _AnimeScreenState extends State<AnimeScreen>
               physics: const BouncingScrollPhysics(),
               padding: const EdgeInsets.symmetric(horizontal: 24),
               itemCount: _moods.length,
-              separatorBuilder: (_, __) => const SizedBox(width: 8),
+              separatorBuilder: (_, _) => const SizedBox(width: 8),
               itemBuilder: (_, i) {
                 final m = _moods[i];
                 final selected = m.id == _selectedMood;
@@ -1378,8 +1378,8 @@ class _AnimeScreenState extends State<AnimeScreen>
               scrollDirection: Axis.horizontal,
               padding: const EdgeInsets.symmetric(horizontal: 24),
               itemCount: 5,
-              separatorBuilder: (_, __) => const SizedBox(width: 14),
-              itemBuilder: (_, __) => Container(
+              separatorBuilder: (_, _) => const SizedBox(width: 14),
+              itemBuilder: (_, _) => Container(
                 width: 160,
                 decoration: BoxDecoration(
                   color: AppTheme.bgCard,
@@ -1520,7 +1520,7 @@ class _AnimeRail extends StatelessWidget {
               padding: EdgeInsets.symmetric(
                   horizontal: showRank ? (hPad - 6).clamp(8.0, 24.0) : hPad),
               itemCount: items.length,
-              separatorBuilder: (_, __) =>
+              separatorBuilder: (_, _) =>
                   SizedBox(width: showRank ? 6 : 14),
               itemBuilder: (_, i) => _AnimeCardTile(
                 anime: items[i],
@@ -1592,9 +1592,9 @@ class _AnimeCardTile extends StatelessWidget {
                     CachedNetworkImage(
                       imageUrl: anime.coverUrl,
                       fit: BoxFit.cover,
-                      placeholder: (_, __) =>
+                      placeholder: (_, _) =>
                           Container(color: AppTheme.bgCard),
-                      errorWidget: (_, __, ___) => Container(
+                      errorWidget: (_, _, _) => Container(
                         color: AppTheme.bgCard,
                         child: const Icon(Icons.broken_image,
                             color: Colors.white24),
@@ -1748,14 +1748,10 @@ class _AnimeCardTile extends StatelessWidget {
 class _HoverScale extends StatefulWidget {
   final Widget child;
   final VoidCallback onTap;
-  final VoidCallback? onLongPress;
-  final double scale;
   final double radius;
   const _HoverScale({
     required this.child,
     required this.onTap,
-    this.onLongPress,
-    this.scale = 1.04,
     this.radius = 14,
   });
 
@@ -1774,12 +1770,16 @@ class _HoverScaleState extends State<_HoverScale> {
       cursor: SystemMouseCursors.click,
       child: GestureDetector(
         onTap: widget.onTap,
-        onLongPress: widget.onLongPress,
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 180),
           curve: Curves.easeOutCubic,
           transform: Matrix4.identity()
-            ..scale(_hover ? widget.scale : 1.0),
+            ..scaleByDouble(
+              _hover ? 1.04 : 1.0,
+              _hover ? 1.04 : 1.0,
+              1.0,
+              1.0,
+            ),
           transformAlignment: Alignment.center,
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(widget.radius),
@@ -1937,7 +1937,7 @@ class _AnimeMosaicSpotlight extends StatelessWidget {
               physics: const BouncingScrollPhysics(),
               padding: EdgeInsets.symmetric(horizontal: hPad),
               itemCount: small.length,
-              separatorBuilder: (_, __) => const SizedBox(width: 10),
+              separatorBuilder: (_, _) => const SizedBox(width: 10),
               itemBuilder: (_, i) => SizedBox(
                 width: smallTileW,
                 child: _AnimeMosaicTile(
@@ -1992,8 +1992,8 @@ class _AnimeMosaicTile extends StatelessWidget {
               CachedNetworkImage(
                 imageUrl: imageUrl,
                 fit: BoxFit.cover,
-                placeholder: (_, __) => Container(color: AppTheme.bgCard),
-                errorWidget: (_, __, ___) =>
+                placeholder: (_, _) => Container(color: AppTheme.bgCard),
+                errorWidget: (_, _, _) =>
                     Container(color: AppTheme.bgCard),
               ),
             Container(

@@ -15,6 +15,9 @@ import 'comics_screen.dart';
 import 'manga_screen.dart';
 import 'jellyfin_screen.dart';
 import 'anime_screen.dart';
+import 'anime_arabic_screen.dart';
+import 'asian_drama_screen.dart';
+import 'similar/similar_hub_screen.dart';
 import 'arabic_screen.dart';
 import 'live_matches_screen.dart';
 import 'magnet_player_screen.dart';
@@ -51,6 +54,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   static const Map<String, Map<String, dynamic>> _navMeta = {
     'home':         {'icon': Icons.home_outlined,              'active': Icons.home,                    'label': 'Home'},
     'discover':     {'icon': Icons.explore_outlined,            'active': Icons.explore,                 'label': 'Discover'},
+    'similar':      {'icon': Icons.auto_awesome_outlined,       'active': Icons.auto_awesome,            'label': 'Similar'},
     'search':       {'icon': Icons.search,                      'active': Icons.search,                  'label': 'Search'},
     'mylist':       {'icon': Icons.bookmark_outline,            'active': Icons.bookmark,                'label': 'My List'},
     'magnet':       {'icon': Icons.link_rounded,                'active': Icons.link_rounded,            'label': 'Magnet'},
@@ -63,6 +67,8 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     'manga':        {'icon': Icons.book_outlined,               'active': Icons.book,                    'label': 'Manga'},
     'jellyfin':     {'icon': Icons.dns_outlined,                'active': Icons.dns_rounded,             'label': 'Jellyfin'},
     'anime':        {'icon': Icons.play_circle_outline,         'active': Icons.play_circle_filled,      'label': 'Anime'},
+    'anime_arabic': {'icon': Icons.subtitles_outlined,           'active': Icons.subtitles,                'label': 'Anime Arabic'},
+    'asian_drama':  {'icon': Icons.theater_comedy_outlined,     'active': Icons.theater_comedy,          'label': 'Asian Drama'},
     'arabic':       {'icon': Icons.movie_filter_outlined,       'active': Icons.movie_filter,            'label': 'Arabic'},
     'settings':     {'icon': Icons.settings_outlined,           'active': Icons.settings,                'label': 'Settings'},
   };
@@ -80,6 +86,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     _allScreens = {
       'home':         const HomeScreen(),
       'discover':     const DiscoverScreen(),
+      'similar':      const SimilarHubScreen(),
       'search':       const SearchScreen(),
       'mylist':       const MyListScreen(),
       'magnet':       const MagnetPlayerScreen(),
@@ -92,6 +99,8 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       'manga':        MangaScreen(initialSearch: null),
       'jellyfin':     const JellyfinScreen(),
       'anime':        const AnimeScreen(),
+      'anime_arabic': const AnimeArabicScreen(),
+      'asian_drama':  const AsianDramaScreen(),
       'arabic':       const ArabicScreen(),
       'settings':     const SettingsScreen(),
     };

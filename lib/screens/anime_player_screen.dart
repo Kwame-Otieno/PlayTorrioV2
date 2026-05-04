@@ -93,6 +93,7 @@ class _AnimePlayerScreenState extends State<AnimePlayerScreen> {
   List<AnimeEmbed> _allEmbeds = const [];
   AnikotoSeries? _series;
   late String _category;
+  // ignore: unused_field
   AnimeEmbed? _activeEmbed;
   String _phase = 'Loading…';
   String _statusLine = '';
@@ -300,6 +301,7 @@ class _AnimePlayerScreenState extends State<AnimePlayerScreen> {
             : (widget.anime.episodes ?? 0));
     final hasNext = totalEpisodes > widget.episodeNumber;
 
+    if (!mounted) return;
     final navigator = Navigator.of(context);
     await navigator.pushReplacement(
       MaterialPageRoute(

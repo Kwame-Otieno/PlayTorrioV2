@@ -407,6 +407,7 @@ class DesktopPlayerScreen extends StatefulWidget {
   final Map<String, dynamic>? providers;
   final Future<void> Function()? onNextEpisode;
   final bool hasNextEpisode;
+  final Future<void> Function(Duration position, Duration duration)? onSaveProgress;
 
   const DesktopPlayerScreen({
     super.key,
@@ -428,6 +429,7 @@ class DesktopPlayerScreen extends StatefulWidget {
     this.providers,
     this.onNextEpisode,
     this.hasNextEpisode = false,
+    this.onSaveProgress,
   });
 
   @override
@@ -667,6 +669,13 @@ class _DesktopPlayerScreenState extends State<DesktopPlayerScreen>
     _historySaved = true;
     final pos = _positionNotifier.value.inMilliseconds;
     final dur = _durationNotifier.value.inMilliseconds;
+
+    if (widget.onSaveProgress != null && pos > 5000) {
+      widget.onSaveProgress!(
+        Duration(milliseconds: pos),
+        Duration(milliseconds: dur),
+      );
+    }
 
     // Save anime watch position
     if (widget.activeProvider != null &&
@@ -1273,6 +1282,25 @@ class _DesktopPlayerScreenState extends State<DesktopPlayerScreen>
         url.contains('/subtitlecat-translate');
 
     final messenger = ScaffoldMessenger.of(context);
+
+    // Already-local subtitle (e.g. kisskh decrypted) — feed straight to libmpv.
+    if (url.startsWith('file://') || url.startsWith('/')) {
+      try {
+        _player.setSubtitleTrack(SubtitleTrack.uri(
+          url.startsWith('file://') ? url : Uri.file(url).toString(),
+          title: s['display'],
+          language: s['language'],
+        ));
+        if (mounted) setState(() => _selectedExternalSubUrl = url);
+      } catch (e) {
+        if (!mounted) return;
+        setState(() => _selectedExternalSubUrl = null);
+        messenger.showSnackBar(
+            SnackBar(content: Text('Subtitle failed: $e — tap to retry')));
+      }
+      return;
+    }
+
     try {
       // Many subtitle CDNs (megacloud, vid-cdn, lostproject.club, etc.) gate
       // on a browser UA and the embed-host Referer (NOT the sub URL's own

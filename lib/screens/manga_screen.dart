@@ -772,6 +772,8 @@ class _MangaCardState extends State<_MangaCard> {
   Widget build(BuildContext context) {
     return FocusableControl(
       onTap: () {
+        final mangaScreenState =
+            context.findAncestorStateOfType<_MangaScreenState>();
         Navigator.push(
           context,
           MaterialPageRoute(
@@ -782,8 +784,6 @@ class _MangaCardState extends State<_MangaCard> {
           widget.onLikeChanged();
           // Reading history may have changed inside details/reader —
           // tell the parent screen to reload it.
-          final mangaScreenState =
-              context.findAncestorStateOfType<_MangaScreenState>();
           mangaScreenState?._loadHistory();
         });
       },

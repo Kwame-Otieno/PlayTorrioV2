@@ -32,6 +32,12 @@ class PlayerScreen extends StatefulWidget {
   final Future<void> Function()? onNextEpisode;
   final bool hasNextEpisode;
 
+  /// Optional progress save hook. Called by the inner player when the
+  /// watch history should be persisted (lifecycle pause, periodic tick,
+  /// player exit). Used by anime / arabic flows that own their own
+  /// per-source history store and don't go through `WatchHistoryService`.
+  final Future<void> Function(Duration position, Duration duration)? onSaveProgress;
+
   const PlayerScreen({
     super.key,
     required this.streamUrl,
@@ -52,6 +58,7 @@ class PlayerScreen extends StatefulWidget {
     this.stremioAddonBaseUrl,
     this.onNextEpisode,
     this.hasNextEpisode = false,
+    this.onSaveProgress,
   });
 
   @override
@@ -172,6 +179,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
         providers: widget.providers,
         onNextEpisode: widget.onNextEpisode,
         hasNextEpisode: widget.hasNextEpisode,
+        onSaveProgress: widget.onSaveProgress,
       );
     } else {
       return DesktopPlayerScreen(
@@ -193,6 +201,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
         providers: widget.providers,
         onNextEpisode: widget.onNextEpisode,
         hasNextEpisode: widget.hasNextEpisode,
+        onSaveProgress: widget.onSaveProgress,
       );
     }
   }

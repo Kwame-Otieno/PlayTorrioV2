@@ -3,7 +3,6 @@ import 'package:flutter/foundation.dart';
 import 'knaben_scraper.dart';
 import 'thepiratebay_scraper.dart';
 import 'uindex_scraper.dart';
-import 'yts_scraper.dart';
 
 class ScraperAggregator {
   static final List<BaseScraper> _scrapers = [

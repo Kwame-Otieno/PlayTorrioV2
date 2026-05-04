@@ -187,7 +187,7 @@ class _AnimeDiscoverScreenState extends State<AnimeDiscoverScreen> {
   Widget build(BuildContext context) {
     return ValueListenableBuilder<AppThemePreset>(
       valueListenable: AppTheme.themeNotifier,
-      builder: (context, _, __) {
+      builder: (context, _, _) {
         return Scaffold(
           backgroundColor: AppTheme.bgDark,
           appBar: AppBar(
@@ -492,9 +492,9 @@ class _AnimeDiscoverScreenState extends State<AnimeDiscoverScreen> {
                     CachedNetworkImage(
                       imageUrl: a.coverUrl,
                       fit: BoxFit.cover,
-                      placeholder: (_, __) =>
+                      placeholder: (_, _) =>
                           Container(color: AppTheme.bgCard),
-                      errorWidget: (_, __, ___) => Container(
+                      errorWidget: (_, _, _) => Container(
                         color: AppTheme.bgCard,
                         child: const Icon(Icons.broken_image,
                             color: Colors.white24),

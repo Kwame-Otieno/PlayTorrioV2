@@ -122,6 +122,7 @@ class _IptvPtPlayerScreenState extends State<IptvPtPlayerScreen>
   int _retryAttempt = 0;
   DateTime? _lastRecoveryAt;
   // When the user explicitly paused (so play-after-pause can rejoin live edge)
+  // ignore: unused_field
   DateTime? _pausedAt;
   final List<int> _backoffMs = const [500, 1000, 2000, 3000, 4000, 6000, 8000, 8000];
   static const int _maxRetries = 8;
