@@ -6,6 +6,7 @@
 | 2 | Trakt token refresh infinite loop | lib/api/trakt_service.dart | 2026-05-16 |
 | 3 | KissKh rate limit crash | lib/api/kisskh_service.dart | 2026-05-16 |
 | 4 | Trakt cache not persisting across restarts | lib/api/trakt_service.dart | 2026-05-16 |
+| 5 | Trakt credentials exposed in repo | lib/api/trakt_service.dart, lib/api/trakt_secrets.dart | 2026-05-16 |
 
 ---
 
@@ -33,4 +34,10 @@
 - **File:** lib/api/trakt_service.dart
 - **Problem:** _cachedExpiry reset to null on every app start, making in-memory cache useless across launches
 - **Fix:** Persisted expiry to SharedPreferences, restored on cold start to skip unnecessary refreshes
+- **Date:** 2026-05-16
+
+## Fix 5: Trakt credentials exposed in repo
+- **File:** lib/api/trakt_service.dart, lib/api/trakt_secrets.dart
+- **Problem:** Real Trakt client ID and secret were hardcoded directly in trakt_service.dart and committed to the public repo, exposing credentials
+- **Fix:** Moved credentials to a git-ignored file lib/api/trakt_secrets.local.dart, added a safe template file lib/api/trakt_secrets.dart with dummy values, imported secrets file in trakt_service.dart, purged old credentials from git history with git filter-branch
 - **Date:** 2026-05-16
