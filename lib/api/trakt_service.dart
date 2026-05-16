@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../services/my_list_service.dart';
 import '../services/watch_history_service.dart';
 import '../services/episode_watched_service.dart';
+import 'trakt_secrets.local.dart';
 
 /// Full Trakt.tv integration — OAuth device-code auth, watchlist sync,
 /// scrobble, playback progress, and two-way import/export.
@@ -21,8 +22,8 @@ class TraktService {
   static const String _baseUrl = 'https://api.trakt.tv';
 
   // Injected at build time via --dart-define or .env
-  static const String _clientId = '402c783c08d5d67c9bedfc894d104437eb0f0ece4fa768df4f37b7d4e5a88394';
-  static const String _clientSecret = 'b9b88e0d436ef119408671c41589d8c4339ff9817caf673325a1262a0fa69290';
+  static const String _clientId  = 'kTraktClientId';
+  static const String _clientSecret = 'kTraktClientSecret';
 
   // ── Secure Storage Keys ────────────────────────────────────────────────
   static const String _keyAccessToken = 'trakt_access_token';
