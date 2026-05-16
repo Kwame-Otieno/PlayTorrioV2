@@ -2,7 +2,35 @@
 
 | # | Fix | File(s) | Date |
 |---|-----|---------|------|
+| 1 | Trakt client ID/secret missing | lib/api/trakt_service.dart | 2026-05-16 |
+| 2 | Trakt token refresh infinite loop | lib/api/trakt_service.dart | 2026-05-16 |
+| 3 | KissKh rate limit crash | lib/api/kisskh_service.dart | 2026-05-16 |
+| 4 | Trakt cache not persisting across restarts | lib/api/trakt_service.dart | 2026-05-16 |
 
 ---
 
 ## Fixes
+
+## Fix 1: Trakt client ID/secret missing
+- **File:** lib/api/trakt_service.dart
+- **Problem:** Credentials were using String.fromEnvironment() and never injected, causing 403 on all Trakt requests
+- **Fix:** Hardcoded client ID and secret directly
+- **Date:** 2026-05-16
+
+## Fix 2: Trakt token refresh infinite loop
+- **File:** lib/api/trakt_service.dart
+- **Problem:** Refresh threshold (7 days) matched token lifetime causing constant refresh loop
+- **Fix:** Added _cachedToken, _cachedExpiry fields, _refreshLock mutex, cache check in _getValidToken, changed threshold from 7 days to 1 day
+- **Date:** 2026-05-16
+
+## Fix 3: KissKh rate limit crash
+- **File:** lib/api/kisskh_service.dart
+- **Problem:** _get() returned raw body without checking HTTP status, causing FormatException when KissKh returned plain text 429 response
+- **Fix:** Added status code check before parsing, throwing Exception on 429 and non-200 responses
+- **Date:** 2026-05-16
+
+## Fix 4: Trakt cache not persisting across restarts
+- **File:** lib/api/trakt_service.dart
+- **Problem:** _cachedExpiry reset to null on every app start, making in-memory cache useless across launches
+- **Fix:** Persisted expiry to SharedPreferences, restored on cold start to skip unnecessary refreshes
+- **Date:** 2026-05-16

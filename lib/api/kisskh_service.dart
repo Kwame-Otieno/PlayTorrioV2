@@ -39,11 +39,19 @@ class KissKhService {
       req.headers.set('Referer', '$baseUrl/');
       req.followRedirects = true;
       final res = await req.close();
-      final body = await res.transform(utf8.decoder).join();
-      if (useCache) {
-        _httpCache[url] = _CacheEntry(body, DateTime.now().add(_cacheTtl));
-      }
-      return body;
+final body = await res.transform(utf8.decoder).join();
+if (res.statusCode == 429) {
+  debugPrint('[KissKh] Rate limited on $url');
+  throw Exception('Too many requests');
+}
+if (res.statusCode != 200) {
+  debugPrint('[KissKh] HTTP ${res.statusCode} on $url');
+  throw Exception('HTTP ${res.statusCode}');
+}
+if (useCache) {
+  _httpCache[url] = _CacheEntry(body, DateTime.now().add(_cacheTtl));
+}
+return body;
     } finally {
       client.close(force: true);
     }
