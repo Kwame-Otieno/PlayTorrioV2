@@ -7,7 +7,7 @@
 | 3 | KissKh rate limit crash | lib/api/kisskh_service.dart | 2026-05-16 |
 | 4 | Trakt cache not persisting across restarts | lib/api/trakt_service.dart | 2026-05-16 |
 | 5 | Trakt credentials exposed in repo | lib/api/trakt_service.dart, lib/api/trakt_secrets.dart | 2026-05-16 |
-
+| 6 | Trakt calendar empty due to timezone | lib/api/trakt_service.dart | 2026-05-17 |
 ---
 
 ## Fixes
@@ -41,3 +41,9 @@
 - **Problem:** Real Trakt client ID and secret were hardcoded directly in trakt_service.dart and committed to the public repo, exposing credentials
 - **Fix:** Moved credentials to a git-ignored file lib/api/trakt_secrets.local.dart, added a safe template file lib/api/trakt_secrets.dart with dummy values, imported secrets file in trakt_service.dart, purged old credentials from git history with git filter-branch
 - **Date:** 2026-05-16
+
+## Fix 6: Trakt calendar empty due to timezone
+- **File:** lib/api/trakt_service.dart
+- **Problem:** Calendar API was using UTC date but my timezone is different this made some episodes to be missed
+- **Fix:** Changed startDate to use local date instead of UTC so it works correctly regardless of timezone
+- **Date:** 2026-05-17

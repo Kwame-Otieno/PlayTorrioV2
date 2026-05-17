@@ -22,8 +22,8 @@ class TraktService {
   static const String _baseUrl = 'https://api.trakt.tv';
 
   // Injected at build time via --dart-define or .env
-  static const String _clientId  = 'kTraktClientId';
-  static const String _clientSecret = 'kTraktClientSecret';
+  static const String _clientId  = kTraktClientId;
+  static const String _clientSecret = kTraktClientSecret;
 
   // ── Secure Storage Keys ────────────────────────────────────────────────
   static const String _keyAccessToken = 'trakt_access_token';
@@ -1012,7 +1012,11 @@ class TraktService {
     final token = await _getValidToken();
     if (token == null) return [];
 
-    final startDate = DateTime.now().toIso8601String().split('T').first;
+    final now = DateTime.now();
+    final startDate = DateTime(now.year, now.month, now.day)
+    .toIso8601String()
+    .split('T')
+    .first;
     try {
       final resp = await http.get(
         Uri.parse('$_baseUrl/calendars/my/shows/$startDate/$days'),
@@ -1033,7 +1037,11 @@ class TraktService {
     final token = await _getValidToken();
     if (token == null) return [];
 
-    final startDate = DateTime.now().toIso8601String().split('T').first;
+    final now = DateTime.now();
+    final startDate = DateTime(now.year, now.month, now.day)
+    .toIso8601String()
+    .split('T')
+    .first;
     try {
       final resp = await http.get(
         Uri.parse('$_baseUrl/calendars/my/movies/$startDate/$days'),
