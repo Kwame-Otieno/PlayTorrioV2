@@ -60,3 +60,4 @@ android/key.properties
 installer/windows/Output/
 lib/api/trakt_secrets.local.dart
 lib/api/trakt_secrets.local.dart
+build/
