@@ -8,6 +8,10 @@
 | 4 | Trakt cache not persisting across restarts | lib/api/trakt_service.dart | 2026-05-16 |
 | 5 | Trakt credentials exposed in repo | lib/api/trakt_service.dart, lib/api/trakt_secrets.dart | 2026-05-16 |
 | 6 | Trakt calendar empty due to timezone | lib/api/trakt_service.dart | 2026-05-17 |
+| 7 | Trakt 401 clears cache and stops loop | lib/api/trakt_service.dart | 2026-05-18 |
+| 8 | Mutex wraps entire _getValidToken() | lib/api/trakt_service.dart | 2026-05-18 |
+| 9 | Simkl credentials moved to local file | lib/api/simkl_service.dart | 2026-05-18 |
+| 10 | Simkl TMDB ID cast fix string vs int | lib/api/simkl_service.dart | 2026-05-18 |
 ---
 
 ## Fixes
