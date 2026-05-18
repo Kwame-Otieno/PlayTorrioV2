@@ -22,7 +22,7 @@ cd PlayTorrioV2
 4. Click **Save**
 5. Copy your **Client ID** and **Client Secret**
 
-### Step 3 — Create Your Local Secrets File
+### Step 3 — Create Your Trakt Local Secrets File
 1. In the project folder go to `lib/api/`
 2. Create a new file called exactly `trakt_secrets.local.dart`
 3. Paste this inside and replace with your real credentials:
@@ -35,6 +35,27 @@ const String kTraktClientSecret = 'your_client_secret_here';
 4. Save the file
 
 > ⚠️ **Important:** This file is git-ignored and will never be committed to the repo. You must create it manually on every machine. Without it the build will fail.
+
+### Step 4 — Get Simkl API Credentials
+1. Go to https://simkl.com/settings/developer/
+2. Click **New App**
+3. Fill in:
+   - **Name:** anything you want
+   - **Redirect URI:** `urn:ietf:wg:oauth:2.0:oob`
+4. Click **Save**
+5. Copy your **Client ID** and **Client Secret**
+
+### Step 5 — Create Your Simkl Local Secrets File
+1. In the project folder go to `lib/api/`
+2. Create a new file called exactly `simkl_secrets.local.dart`
+3. Paste this inside and replace with your real credentials:
+```dart
+const String kSimklClientId = 'your_client_id_here';
+const String kSimklClientSecret = 'your_client_secret_here';
+```
+ 
+4. Save the file
+> ⚠️ **Important:** This file is also git-ignored and must be created manually on every machine.
 
 ## File Structure
 
