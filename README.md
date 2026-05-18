@@ -6,13 +6,27 @@ This is a personal fork of [PlayTorrioV2](https://github.com/ayman708-UX/PlayTor
 
 ## First Time Setup
 
-### Step 1 — Clone the repo
+### Step 1 — Install Flutter
+1. Go to https://flutter.dev/docs/get-started/install
+2. Follow the instructions for your operating system
+3. After installing verify it works by running:
+```bash
+flutter doctor
+```
+4. Make sure you see no critical errors before proceeding
+
+> ⚠️ **Important:** Flutter must be installed and working before you can build the app. Run `flutter doctor` to check your setup.
+
+---
+
+
+### Step 2 — Clone the repo
 ```bash
 git clone https://github.com/Kwame-Otieno/PlayTorrioV2.git
 cd PlayTorrioV2
 ```
 
-### Step 2 — Get Trakt API Credentials
+### Step 3 — Get Trakt API Credentials
 1. Go to https://trakt.tv/oauth/applications
 2. Click **New Application**
 3. Fill in:
@@ -22,7 +36,7 @@ cd PlayTorrioV2
 4. Click **Save**
 5. Copy your **Client ID** and **Client Secret**
 
-### Step 3 — Create Your Trakt Local Secrets File
+### Step 4 — Create Your Trakt Local Secrets File
 1. In the project folder go to `lib/api/`
 2. Create a new file called exactly `trakt_secrets.local.dart`
 3. Paste this inside and replace with your real credentials:
@@ -36,7 +50,7 @@ const String kTraktClientSecret = 'your_client_secret_here';
 
 > ⚠️ **Important:** This file is git-ignored and will never be committed to the repo. You must create it manually on every machine. Without it the build will fail.
 
-### Step 4 — Get Simkl API Credentials
+### Step 5 — Get Simkl API Credentials
 1. Go to https://simkl.com/settings/developer/
 2. Click **New App**
 3. Fill in:
@@ -45,7 +59,7 @@ const String kTraktClientSecret = 'your_client_secret_here';
 4. Click **Save**
 5. Copy your **Client ID** and **Client Secret**
 
-### Step 5 — Create Your Simkl Local Secrets File
+### Step 6 — Create Your Simkl Local Secrets File
 1. In the project folder go to `lib/api/`
 2. Create a new file called exactly `simkl_secrets.local.dart`
 3. Paste this inside and replace with your real credentials:
@@ -71,17 +85,17 @@ PlayTorrioV2/
 │   └── kisskh_service.dart   ← patched
 └── lib/api/trakt_secrets.local.dart  ← YOUR credentials (git-ignored)
 ```
-### Step 6 — Install Dependencies
+### Step 7 — Install Dependencies
 ```bash
 flutter pub get
 ```
 
-### Step 7 — Add Linux Desktop Support
+### Step 8 — Add Linux Desktop Support
 ```bash
 flutter create --platforms=linux .
 ```
 
-### Step 8 — Build
+### Step 9 — Build
 ```bash
 flutter build linux --release
 ```
