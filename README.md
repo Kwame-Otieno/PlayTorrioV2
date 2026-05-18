@@ -77,7 +77,7 @@ const String kSimklClientSecret = 'your_client_secret_here';
 PlayTorrioV2/
 ├── patches/
 │   └── my-fixes.patch              ← all fixes as a reapplicable patch
-├── update.sh                       ← one command to update everything
+├── update.sh                       ← script to update everything
 ├── PATCHES.md                      ← detailed fix documentation
 ├── lib/api/
 │   ├── trakt_service.dart          ← patched
