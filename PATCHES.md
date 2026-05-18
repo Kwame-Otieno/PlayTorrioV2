@@ -47,3 +47,27 @@
 - **Problem:** Calendar API was using UTC date but my timezone is different this made some episodes to be missed
 - **Fix:** Changed startDate to use local date instead of UTC so it works correctly regardless of timezone
 - **Date:** 2026-05-17
+
+## Fix 7: Trakt 401 clears cache and stops loop
+- **File:** lib/api/trakt_service.dart
+- **Problem:** When Trakt returned 401 on token refresh the app kept retrying forever since the invalid token was never cleared
+- **Fix:** Added 401 check in _refreshToken() to immediately clear all tokens, cache fields and SharedPreferences expiry on revocation
+- **Date:** 2026-05-18
+
+## Fix 8: Mutex wraps entire _getValidToken()
+- **File:** lib/api/trakt_service.dart
+- **Problem:** Multiple async calls hit _getValidToken() simultaneously before cache was populated, causing parallel refresh requests that triggered Trakt rate limiting
+- **Fix:** Wrapped the entire _getValidToken() method in _refreshLock.synchronized() so only one call executes at a time and the rest wait for the cached result
+- **Date:** 2026-05-18
+
+## Fix 9: Simkl credentials moved to local file
+- **File:** lib/api/simkl_service.dart
+- **Problem:** Simkl client ID and secret were using String.fromEnvironment() and never injected at build time, causing 403 on all Simkl login attempts
+- **Fix:** Moved credentials to git-ignored lib/api/simkl_secrets.local.dart, added safe template simkl_secrets.dart, imported in simkl_service.dart
+- **Date:** 2026-05-18
+
+## Fix 10: Simkl TMDB ID cast crash
+- **File:** lib/api/simkl_service.dart
+- **Problem:** Simkl API returns TMDB IDs as strings but code was casting directly to int? causing a type cast crash on watchlist import
+- **Fix:** Changed cast to handle both string and int formats using int.tryParse() as fallback
+- **Date:** 2026-05-18
