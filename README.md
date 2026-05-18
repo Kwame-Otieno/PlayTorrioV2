@@ -71,17 +71,17 @@ PlayTorrioV2/
 │   └── kisskh_service.dart   ← patched
 └── lib/api/trakt_secrets.local.dart  ← YOUR credentials (git-ignored)
 ```
-### Step 4 — Install Dependencies
+### Step 6 — Install Dependencies
 ```bash
 flutter pub get
 ```
 
-### Step 5 — Add Linux Desktop Support
+### Step 7 — Add Linux Desktop Support
 ```bash
 flutter create --platforms=linux .
 ```
 
-### Step 6 — Build
+### Step 8 — Build
 ```bash
 flutter build linux --release
 ```
