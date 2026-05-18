@@ -133,6 +133,17 @@ class TraktService {
         return true;
       }
       debugPrint('[Trakt] Token refresh failed: ${response.statusCode}');
+      if (response.statusCode == 401) {
+        debugPrint('[Trakt] Refresh token revoked — clearing auth');
+        await _storage.delete(key: _keyAccessToken);
+        await _storage.delete(key: _keyRefreshToken);
+        await _storage.delete(key: _keyExpiresAt);
+        _cachedToken = null;
+        _cachedExpiry = null;
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.remove('trakt_cached_expiry');
+        loginNotifier.value = false;
+      }
     } catch (e) {
       debugPrint('[Trakt] Token refresh error: $e');
     }
@@ -1448,43 +1459,53 @@ class TraktService {
 
   /// Get a valid access token, refreshing if near expiry.
   Future<String?> _getValidToken() async {
-if (_cachedToken != null && _cachedExpiry != null &&
-    DateTime.now().isBefore(_cachedExpiry!.subtract(const Duration(days: 1)))) {
-  return _cachedToken;
-}
-// Restore expiry from persistent storage if cache is cold (fresh app start)
-if (_cachedExpiry == null) {
-  final prefs = await SharedPreferences.getInstance();
-  final saved = prefs.getString('trakt_cached_expiry');
-  if (saved != null) {
-    _cachedExpiry = DateTime.tryParse(saved);
-  }
-}
-if (_cachedExpiry != null &&
-    DateTime.now().isBefore(_cachedExpiry!.subtract(const Duration(days: 1)))) {
-  _cachedToken = await _storage.read(key: _keyAccessToken);
-  return _cachedToken;
-}
-    final token = await _storage.read(key: _keyAccessToken);
-    if (token == null) return null;
-
-    final expiresAtStr = await _storage.read(key: _keyExpiresAt);
-    if (expiresAtStr != null) {
-      final expiresAt = DateTime.tryParse(expiresAtStr);
-      if (expiresAt != null &&
-          DateTime.now().isAfter(expiresAt.subtract(const Duration(days: 7)))) {
-        // Token expires within 7 days — refresh it
-        debugPrint('[Trakt] Token nearing expiry, refreshing...');
-        final refreshed = await _refreshLock.synchronized(() => _refreshToken());
-        if (refreshed) {
-          return await _storage.read(key: _keyAccessToken);
+    return _refreshLock.synchronized(() async {
+      // Return cached token if still valid
+      if (_cachedToken != null && _cachedExpiry != null &&
+        DateTime.now().isBefore(_cachedExpiry!.subtract(const Duration(days: 1)))) {
+        return _cachedToken;
         }
-        // If refresh failed but token isn't actually expired yet, use it
+
+        // Restore expiry from persistent storage if cache is cold
+        if (_cachedExpiry == null) {
+          final prefs = await SharedPreferences.getInstance();
+          final saved = prefs.getString('trakt_cached_expiry');
+          if (saved != null) {
+            _cachedExpiry = DateTime.tryParse(saved);
+          }
+        }
+
+        // Return from storage if still valid
+        if (_cachedExpiry != null &&
+          DateTime.now().isBefore(_cachedExpiry!.subtract(const Duration(days: 1)))) {
+          _cachedToken = await _storage.read(key: _keyAccessToken);
+        return _cachedToken;
+          }
+
+          // Read token from storage
+          final token = await _storage.read(key: _keyAccessToken);
+          if (token == null) return null;
+
+          // Check expiry and refresh if needed
+          final expiresAtStr = await _storage.read(key: _keyExpiresAt);
+      if (expiresAtStr != null) {
+        final expiresAt = DateTime.tryParse(expiresAtStr);
+        if (expiresAt != null &&
+          DateTime.now().isAfter(expiresAt.subtract(const Duration(days: 1)))) {
+          debugPrint('[Trakt] Token nearing expiry, refreshing...');
+        final refreshed = await _refreshToken();
+        if (refreshed) {
+          return _cachedToken;
+        }
         if (DateTime.now().isBefore(expiresAt)) return token;
         return null;
+          }
       }
-    }
-    return token;
+
+      // Token is valid, cache it
+      _cachedToken = token;
+      return token;
+    });
   }
 
   /// Handle 401 unauthorized — token revoked server-side.
@@ -1494,6 +1515,9 @@ if (_cachedExpiry != null &&
       _storage.delete(key: _keyAccessToken);
       _storage.delete(key: _keyRefreshToken);
       _storage.delete(key: _keyExpiresAt);
+      _cachedToken = null;
+      _cachedExpiry = null;
+      SharedPreferences.getInstance().then((prefs) => prefs.remove('trakt_cached_expiry'));
       _initialSyncDone = false;
       loginNotifier.value = false;
     }

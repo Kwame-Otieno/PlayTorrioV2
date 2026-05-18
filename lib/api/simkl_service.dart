@@ -6,6 +6,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../services/my_list_service.dart';
 import '../services/episode_watched_service.dart';
+import 'simkl_secrets.local.dart';
 
 /// Full Simkl integration — PIN-based auth, watchlist sync,
 /// scrobble, history, ratings, and two-way import/export.
@@ -19,11 +20,8 @@ class SimklService {
   static const String _baseUrl = 'https://api.simkl.com';
 
   // Injected at build time via --dart-define or .env
-  static const String _clientId =
-      String.fromEnvironment('SIMKL_CLIENT_ID');
-  // ignore: unused_field
-  static const String _clientSecret =
-      String.fromEnvironment('SIMKL_CLIENT_SECRET');
+  static const String _clientId = kSimklClientId;
+  static const String _clientSecret = kSimklClientSecret;
 
   // ── Secure Storage Keys ────────────────────────────────────────────────
   static const String _keyAccessToken = 'simkl_access_token';
@@ -462,7 +460,8 @@ class SimklService {
           final item = raw as Map<String, dynamic>;
           final show = item['show'] ?? item['movie'] ?? item;
           final ids = show['ids'] as Map<String, dynamic>? ?? {};
-          final tmdbId = ids['tmdb'] as int?;
+          final tmdbRaw = ids['tmdb'];
+          final tmdbId = tmdbRaw is int ? tmdbRaw : int.tryParse(tmdbRaw?.toString() ?? '');
           final imdbId = ids['imdb']?.toString();
           final title = show['title']?.toString() ?? 'Unknown';
           final mediaType = type == 'shows' ? 'tv' : 'movie';
@@ -603,9 +602,9 @@ class SimklService {
         final item = raw as Map<String, dynamic>;
         final show = item['show'] ?? item;
         final ids = show['ids'] as Map<String, dynamic>? ?? {};
-        final tmdbId = ids['tmdb'] as int?;
+        final tmdbRaw = ids['tmdb'];
+        final tmdbId = tmdbRaw is int ? tmdbRaw : int.tryParse(tmdbRaw?.toString() ?? '');
         if (tmdbId == null) continue;
-
         final seasons = item['seasons'] as List? ?? [];
         for (final s in seasons) {
           final sNum = s['number'] as int? ?? 0;

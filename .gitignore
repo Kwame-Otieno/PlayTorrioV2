@@ -61,3 +61,4 @@ installer/windows/Output/
 lib/api/trakt_secrets.local.dart
 lib/api/trakt_secrets.local.dart
 build/
+lib/api/simkl_secrets.local.dart
