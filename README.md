@@ -76,14 +76,18 @@ const String kSimklClientSecret = 'your_client_secret_here';
 ```
 PlayTorrioV2/
 ├── patches/
-│   └── my-fixes.patch        ← all fixes as a reapplicable patch
-├── update.sh                 ← one command to update everything
-├── PATCHES.md                ← detailed fix documentation
+│   └── my-fixes.patch              ← all fixes as a reapplicable patch
+├── update.sh                       ← one command to update everything
+├── PATCHES.md                      ← detailed fix documentation
 ├── lib/api/
-│   ├── trakt_service.dart    ← patched
-│   ├── trakt_secrets.dart    ← template (safe to commit)
-│   └── kisskh_service.dart   ← patched
-└── lib/api/trakt_secrets.local.dart  ← YOUR credentials (git-ignored)
+│   ├── trakt_service.dart          ← patched
+│   ├── trakt_secrets.dart          ← template (safe to commit)
+│   ├── trakt_secrets.local.dart    ← YOUR Trakt credentials (git-ignored)
+│   ├── simkl_service.dart          ← patched
+│   ├── simkl_secrets.dart          ← template (safe to commit)
+│   ├── simkl_secrets.local.dart    ← YOUR Simkl credentials (git-ignored)
+│   └── kisskh_service.dart         ← patched
+
 ```
 ### Step 7 — Install Dependencies
 ```bash
