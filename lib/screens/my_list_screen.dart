@@ -175,16 +175,27 @@ class _MyListScreenState extends State<MyListScreen> {
                       item: item,
                       onTap: () => _openItem(item),
                       onRemove: () async {
-                        await _myList.remove(item['uniqueId']);
+                        // Derive uniqueId — items imported from Trakt before
+                        // the self-heal ran may have a null uniqueId, so we
+                        // fall back to the same formula MyListService uses.
+                        final rawUid = item['uniqueId']?.toString();
+                        final tmdbId = item['tmdbId'] as int?;
+                        final mediaType = item['mediaType']?.toString() ?? 'movie';
+                        final uniqueId = rawUid ??
+                            (tmdbId != null
+                                ? MyListService.movieId(tmdbId, mediaType)
+                                : null);
+                        if (uniqueId == null) return; // nothing we can key on
+
+                        await _myList.remove(uniqueId);
                         if (context.mounted) {
                           ScaffoldMessenger.of(context).showSnackBar(
                             SnackBar(
-                              content: Text('Removed "${item['title']}" from My List'),
+                              content: Text('Removed "${item['title'] ?? 'item'}" from My List'),
                               duration: const Duration(seconds: 2),
                               action: SnackBarAction(
                                 label: 'UNDO',
                                 onPressed: () {
-                                  // Re-add the item
                                   if (item['source'] == 'stremio') {
                                     _myList.addStremioItem({
                                       'name': item['title'],
@@ -196,13 +207,13 @@ class _MyListScreenState extends State<MyListScreen> {
                                     });
                                   } else {
                                     _myList.addMovie(
-                                      tmdbId: item['tmdbId'] ?? 0,
-                                      imdbId: item['imdbId'],
-                                      title: item['title'] ?? '',
-                                      posterPath: item['posterPath'] ?? '',
-                                      mediaType: item['mediaType'] ?? 'movie',
+                                      tmdbId: item['tmdbId'] as int? ?? 0,
+                                      imdbId: item['imdbId']?.toString(),
+                                      title: item['title']?.toString() ?? '',
+                                      posterPath: item['posterPath']?.toString() ?? '',
+                                      mediaType: item['mediaType']?.toString() ?? 'movie',
                                       voteAverage: (item['voteAverage'] as num?)?.toDouble() ?? 0,
-                                      releaseDate: item['releaseDate'] ?? '',
+                                      releaseDate: item['releaseDate']?.toString() ?? '',
                                     );
                                   }
                                 },

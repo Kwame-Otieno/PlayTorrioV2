@@ -22,10 +22,30 @@ class EpisodeWatchedService {
   Future<Map<String, bool>> _load() async {
     if (_cache != null) return _cache!;
     final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString(_key);
-    if (raw != null) {
-      final decoded = json.decode(raw) as Map<String, dynamic>;
-      _cache = decoded.map((k, v) => MapEntry(k, v == true));
+    // Guard: value may be a raw Map (wrong type from an older build) or a
+    // JSON-encoded String (correct). Use prefs.get() to avoid the cast crash.
+    final stored = prefs.get(_key);
+    if (stored != null) {
+      try {
+        Map<String, dynamic> decoded;
+        if (stored is String) {
+          decoded = json.decode(stored) as Map<String, dynamic>;
+        } else if (stored is Map) {
+          decoded = Map<String, dynamic>.from(stored);
+          // Self-heal: re-write as proper JSON string.
+          await prefs.setString(_key, json.encode(decoded));
+        } else {
+          debugPrint('[EpisodeWatched] Unexpected type ${stored.runtimeType} for $_key, resetting');
+          await prefs.remove(_key);
+          _cache = {};
+          return _cache!;
+        }
+        _cache = decoded.map((k, v) => MapEntry(k, v == true));
+      } catch (e) {
+        debugPrint('[EpisodeWatched] Failed to decode $_key: $e — resetting');
+        await prefs.remove(_key);
+        _cache = {};
+      }
     } else {
       _cache = {};
     }

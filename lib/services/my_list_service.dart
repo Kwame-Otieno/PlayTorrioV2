@@ -47,18 +47,40 @@ class MyListService {
   Future<void> _init() async {
     if (_loaded) return;
     final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString(_key);
-    if (raw != null) {
+
+    // Guard: value may be a raw List (wrong type from an older build) or a
+    // JSON-encoded String (correct). Use prefs.get() to avoid the cast crash.
+    final stored = prefs.get(_key);
+    if (stored != null) {
       try {
+        List<dynamic> decoded;
+        if (stored is String) {
+          decoded = json.decode(stored) as List<dynamic>;
+        } else if (stored is List) {
+          decoded = stored;
+          // Self-heal: rewrite as JSON string so future reads work correctly.
+          await prefs.setString(_key, json.encode(decoded));
+        } else {
+          debugPrint('[MyList] Unexpected type ${stored.runtimeType} for $_key, resetting');
+          await prefs.remove(_key);
+          _items = [];
+          _loaded = true;
+          _notify();
+          return;
+        }
         _items = List<Map<String, dynamic>>.from(
-          (json.decode(raw) as List).map((e) => Map<String, dynamic>.from(e)),
+          decoded.map((e) => Map<String, dynamic>.from(e as Map)),
         );
       } catch (e) {
         debugPrint('[MyList] Failed to decode: $e');
         _items = [];
       }
     }
+
     _loaded = true;
+    // Remove duplicates introduced by Trakt import sync-back, and self-heal
+    // any items missing a uniqueId.
+    await deduplicateByTmdbId();
     _notify();
   }
 
@@ -95,7 +117,7 @@ class MyListService {
     return _items.any((e) => e['uniqueId'] == uniqueId);
   }
 
-  /// Add a TMDB Movie to the list. No-op if already present.
+  /// Add a TMDB Movie to the list and sync to Trakt/Simkl. No-op if already present.
   Future<void> addMovie({
     required int tmdbId,
     String? imdbId,
@@ -121,8 +143,38 @@ class MyListService {
       'addedAt': DateTime.now().millisecondsSinceEpoch,
     });
     await _save();
-    // Sync to Trakt in background
     _traktAdd(tmdbId, imdbId, mediaType);
+  }
+
+  /// Same as [addMovie] but does NOT push back to Trakt/Simkl.
+  /// Use this when importing items that already originated from those services
+  /// to avoid creating duplicates on the remote side.
+  Future<void> addMovieSilent({
+    required int tmdbId,
+    String? imdbId,
+    required String title,
+    required String posterPath,
+    required String mediaType,
+    double voteAverage = 0,
+    String releaseDate = '',
+  }) async {
+    await _ensureLoaded();
+    final uid = movieId(tmdbId, mediaType);
+    if (contains(uid)) return;
+    _items.insert(0, {
+      'uniqueId': uid,
+      'tmdbId': tmdbId,
+      'imdbId': imdbId,
+      'title': title,
+      'posterPath': posterPath,
+      'mediaType': mediaType,
+      'voteAverage': voteAverage,
+      'releaseDate': releaseDate,
+      'source': 'tmdb',
+      'addedAt': DateTime.now().millisecondsSinceEpoch,
+    });
+    await _save();
+    // No remote sync — item already exists on Trakt/Simkl.
   }
 
   /// Add a Stremio catalog item (Map) to the list.
@@ -144,7 +196,6 @@ class MyListService {
       'addedAt': DateTime.now().millisecondsSinceEpoch,
     });
     await _save();
-    // Sync to Trakt in background
     final imdb = item['imdb_id']?.toString() ?? item['imdbId']?.toString();
     _traktAdd(null, imdb, item['type']?.toString() ?? 'movie');
   }
@@ -152,7 +203,6 @@ class MyListService {
   /// Remove by unique ID.
   Future<void> remove(String uniqueId) async {
     await _ensureLoaded();
-    // Capture ids before removing for Trakt sync
     final item = _items.cast<Map<String, dynamic>?>().firstWhere(
       (e) => e?['uniqueId'] == uniqueId,
       orElse: () => null,
@@ -162,7 +212,6 @@ class MyListService {
     final mediaType = item?['mediaType']?.toString() ?? 'movie';
     _items.removeWhere((e) => e['uniqueId'] == uniqueId);
     await _save();
-    // Sync removal to Trakt in background
     _traktRemove(tmdbId, imdbId, mediaType);
   }
 
@@ -206,11 +255,57 @@ class MyListService {
     }
   }
 
+  /// Remove duplicate entries for the same tmdbId+mediaType, keeping the one
+  /// added most recently (highest addedAt). Also self-heals items missing a
+  /// uniqueId by deriving it from tmdbId+mediaType.
+  Future<int> deduplicateByTmdbId() async {
+    final before = _items.length;
+
+    // Self-heal missing uniqueIds.
+    for (final item in _items) {
+      if (item['uniqueId'] == null) {
+        final tmdbId = item['tmdbId'] as int?;
+        final mediaType = item['mediaType']?.toString() ?? 'movie';
+        if (tmdbId != null) {
+          item['uniqueId'] = movieId(tmdbId, mediaType);
+        }
+      }
+    }
+
+    // Group by (tmdbId, mediaType). Keep the entry with the highest addedAt.
+    final seen = <String, Map<String, dynamic>>{};
+    for (final item in _items) {
+      final tmdbId = item['tmdbId'] as int?;
+      if (tmdbId == null) continue;
+      final mediaType = item['mediaType']?.toString() ?? 'movie';
+      final key = '${tmdbId}_$mediaType';
+      final existing = seen[key];
+      if (existing == null) {
+        seen[key] = item;
+      } else {
+        final existingAt = existing['addedAt'] as int? ?? 0;
+        final thisAt = item['addedAt'] as int? ?? 0;
+        if (thisAt > existingAt) seen[key] = item;
+      }
+    }
+
+    // Rebuild: deduped TMDB items + Stremio-only items (no tmdbId).
+    final noTmdb = _items.where((e) => e['tmdbId'] == null).toList();
+    _items = [...seen.values.toList(), ...noTmdb];
+
+    final removed = before - _items.length;
+    if (removed > 0) {
+      await _save();
+      debugPrint('[MyList] Deduplicated $removed duplicate entries');
+    }
+    return removed;
+  }
+
   Future<void> _ensureLoaded() async {
     if (!_loaded) await _init();
   }
 
-  // ── Trakt background sync ─────────────────────────────────────────────
+  // ── Trakt & Simkl background sync ─────────────────────────────────────
   void _traktAdd(int? tmdbId, String? imdbId, String mediaType) {
     if (tmdbId == null && imdbId == null) return;
     TraktService().isLoggedIn().then((loggedIn) {
@@ -222,7 +317,6 @@ class MyListService {
         );
       }
     });
-    // Also sync to Simkl
     SimklService().isLoggedIn().then((loggedIn) {
       if (loggedIn) {
         SimklService().addToWatchlist(
@@ -245,7 +339,6 @@ class MyListService {
         );
       }
     });
-    // Also sync removal to Simkl
     SimklService().isLoggedIn().then((loggedIn) {
       if (loggedIn) {
         SimklService().removeFromWatchlist(

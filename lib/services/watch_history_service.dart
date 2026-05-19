@@ -77,7 +77,7 @@ class WatchHistoryService {
 
     try {
       final prefs = await SharedPreferences.getInstance();
-      final String? jsonString = prefs.getString(_key);
+      final String? jsonString = await _safeGetString(prefs, _key);
       List<dynamic> list = jsonString != null ? json.decode(jsonString) : [];
 
       // Remove existing entry with same uniqueId
@@ -94,7 +94,7 @@ class WatchHistoryService {
       await prefs.setString(_key, json.encode(list));
       
       // 3. Remove from dismissed list if it was there
-      final String? dismissedJson = prefs.getString(_dismissedKey);
+      final String? dismissedJson = await _safeGetString(prefs, _dismissedKey);
       if (dismissedJson != null) {
         List<dynamic> dismissedList = json.decode(dismissedJson);
         if (dismissedList.contains(uniqueId)) {
@@ -119,7 +119,7 @@ class WatchHistoryService {
   Future<List<Map<String, dynamic>>> getHistory() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final String? jsonString = prefs.getString(_key);
+      final String? jsonString = await _safeGetString(prefs, _key);
       if (jsonString == null) return [];
       
       final List<dynamic> list = json.decode(jsonString);
@@ -154,7 +154,7 @@ class WatchHistoryService {
       final prefs = await SharedPreferences.getInstance();
       
       // 1. Remove from active history
-      final String? jsonString = prefs.getString(_key);
+      final String? jsonString = await _safeGetString(prefs, _key);
       if (jsonString != null) {
         List<dynamic> list = json.decode(jsonString);
         list.removeWhere((item) => item['uniqueId'] == uniqueId);
@@ -166,7 +166,7 @@ class WatchHistoryService {
       }
 
       // 2. Add to dismissed list so it's never re-imported from Trakt
-      final String? dismissedJson = prefs.getString(_dismissedKey);
+      final String? dismissedJson = await _safeGetString(prefs, _dismissedKey);
       List<dynamic> dismissedList = dismissedJson != null ? json.decode(dismissedJson) : [];
       if (!dismissedList.contains(uniqueId)) {
         dismissedList.add(uniqueId);
@@ -186,7 +186,7 @@ class WatchHistoryService {
   Future<bool> isDismissed(String uniqueId) async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final String? jsonString = prefs.getString(_dismissedKey);
+      final String? jsonString = await _safeGetString(prefs, _dismissedKey);
       if (jsonString == null) return false;
       final List<dynamic> list = json.decode(jsonString);
       return list.contains(uniqueId);
@@ -195,6 +195,18 @@ class WatchHistoryService {
     }
   }
   
+  /// Safely read a string pref key. If the value is stored as the wrong type
+  /// (e.g. a List or Map from an older build), removes the bad entry and
+  /// returns null so callers fall back to their empty-state defaults.
+  Future<String?> _safeGetString(SharedPreferences prefs, String key) async {
+    final stored = prefs.get(key);
+    if (stored == null) return null;
+    if (stored is String) return stored;
+    debugPrint('[WatchHistory] Key "$key" has unexpected type ${stored.runtimeType}, clearing');
+    await prefs.remove(key);
+    return null;
+  }
+
   void dispose() {
     _controller.close();
   }

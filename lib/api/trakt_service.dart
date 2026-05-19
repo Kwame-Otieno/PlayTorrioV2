@@ -210,7 +210,7 @@ class TraktService {
           final uid = MyListService.movieId(tmdbId, 'movie');
           if (!MyListService().contains(uid)) {
             final poster = await _fetchTmdbPoster(tmdbId, 'movie');
-            await MyListService().addMovie(
+            await MyListService().addMovieSilent(
               tmdbId: tmdbId,
               imdbId: ids['imdb']?.toString(),
               title: movie['title']?.toString() ?? 'Unknown',
@@ -241,7 +241,7 @@ class TraktService {
           final uid = MyListService.movieId(tmdbId, 'tv');
           if (!MyListService().contains(uid)) {
             final poster = await _fetchTmdbPoster(tmdbId, 'tv');
-            await MyListService().addMovie(
+            await MyListService().addMovieSilent(
               tmdbId: tmdbId,
               imdbId: ids['imdb']?.toString(),
               title: show['title']?.toString() ?? 'Unknown',
