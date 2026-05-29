@@ -72,6 +72,12 @@ class WebStreamrService {
   static late List<Source> _sources;
   static late StreamResolver _resolver;
 
+  // Blacklisted sources (temporarily disabled due to failures)
+  static const _blacklistedSources = {
+    'vixsrc',  // Extractor broken: token/expires/url not found
+    'rgshows', // DNS failure: api.rgshows.ru unreachable
+  };
+
   /// Call once at app start (safe to call repeatedly — re-applies env).
   static Future<void> init() async {
     final tmdbToken = await WebStreamrSettings.getTmdbAccessToken();
@@ -86,7 +92,10 @@ class WebStreamrService {
     if (_initialized) return;
     _initialized = true;
 
-    _fetcher = Fetcher(logger: (msg) => debugPrint('[WS] $msg'));
+    // Initialize fetcher
+    _fetcher = Fetcher(
+      logger: (msg) => debugPrint('[WS] $msg'),
+    );
 
     final hubCloud = HubCloud(_fetcher);
 
@@ -125,16 +134,21 @@ class WebStreamrService {
     ];
 
     _registry = ExtractorRegistry(
-        (lvl, msg) => debugPrint('[WS:$lvl] $msg'), extractors);
+      (lvl, msg) => debugPrint('[WS:$lvl] $msg'), extractors);
 
+    // Prioritize fast/reliable sources first to reduce total wait time
+    // Order: Most reliable -> Less reliable
     _sources = <Source>[
-      // multi
+      // === PRIORITY 1: Fast & Reliable (Tested Working) ===
+      VegaMoviesSource(_fetcher),
+      VidSrcSource(_fetcher),
+
+
+      // === PRIORITY 2: Multi-region sources ===
       FourKHDHubSource(_fetcher),
       HDHub4uSource(_fetcher),
-      VegaMoviesSource(_fetcher),
-      VixSrcSource(_fetcher),
-      VidSrcSource(_fetcher),
-      RgShowsSource(_fetcher),
+
+      // === PRIORITY 3: Other regions (AL, ES, MX, DE, FR, IT) ===
       // AL
       KokoshkaSource(_fetcher),
       // ES / MX
@@ -155,10 +169,14 @@ class WebStreamrService {
       // IT
       EurostreamingSource(_fetcher),
       MostraGuardaSource(_fetcher),
+
+      // === DISABLED: Blacklisted sources (fail consistently) ===
+      // VixSrcSource(_fetcher), // Extractor broken - token/expires/url not found
+      // RgShowsSource(_fetcher), // DNS failure - api.rgshows.ru unreachable
     ];
 
     _resolver =
-        StreamResolver((lvl, msg) => debugPrint('[WS:$lvl] $msg'), _registry);
+    StreamResolver((lvl, msg) => debugPrint('[WS:$lvl] $msg'), _registry);
   }
 
   /// Drop-in replacement for the old remote `getStreams`.
@@ -178,13 +196,13 @@ class WebStreamrService {
       final Id id;
       if (RegExp(r'^tt\d+$').hasMatch(base)) {
         final raw = isMovie
-            ? imdbId
-            : '$imdbId:${season ?? 1}:${episode ?? 1}';
+        ? imdbId
+        : '$imdbId:${season ?? 1}:${episode ?? 1}';
         id = ImdbId.fromString(raw);
       } else if (tmdbId != null) {
         final raw = isMovie
-            ? '$tmdbId'
-            : '$tmdbId:${season ?? 1}:${episode ?? 1}';
+        ? '$tmdbId'
+        : '$tmdbId:${season ?? 1}:${episode ?? 1}';
         id = TmdbId.fromString(raw);
       } else {
         debugPrint('[WebStreamrService] No valid IMDb/TMDB id for "$imdbId"');
@@ -192,15 +210,27 @@ class WebStreamrService {
       }
 
       final ctx = await _buildContext(id);
+
+      // Filter out blacklisted sources early
+      final filteredSources = _sources.where((source) {
+        final sourceName = source.runtimeType.toString().toLowerCase();
+        return !_blacklistedSources.any((blacklisted) =>
+        sourceName.contains(blacklisted));
+      }).toList();
+
       // Mirror upstream StreamController: only run sources that have at
       // least one country code enabled in the user's config. Avoids wasting
       // network on sources whose results would be filtered out anyway.
-      final activeSources = _sources
-          .where((s) =>
-              s.countryCodes.any((cc) => ctx.config.containsKey(cc.name)))
-          .toList();
+      final activeSources = filteredSources
+      .where((s) =>
+      s.countryCodes.any((cc) => ctx.config.containsKey(cc.name)))
+      .toList();
       debugPrint(
-          '[WebStreamrService] ${activeSources.length}/${_sources.length} sources active for config ${ctx.config.keys.where((k) => k.length == 2 || k == 'multi').toList()}');
+        '[WebStreamrService] ${activeSources.length}/${filteredSources.length} sources active for config ${ctx.config.keys.where((k) => k.length == 2 || k == 'multi').toList()}');
+
+      // Process all active sources in parallel (not batched)
+      // The resolver internally handles parallelism, but we ensure all
+      // enabled sources are tried concurrently
       final res = await _resolver.resolve(ctx, activeSources, type, id);
 
       final out = <StreamSource>[];
@@ -213,16 +243,16 @@ class WebStreamrService {
         Map<String, String>? headers;
         final bh = s['behaviorHints'];
         if (bh is Map &&
-            bh['proxyHeaders'] is Map &&
-            (bh['proxyHeaders'] as Map)['request'] is Map) {
+          bh['proxyHeaders'] is Map &&
+          (bh['proxyHeaders'] as Map)['request'] is Map) {
           headers = Map<String, String>.from(
-              (bh['proxyHeaders'] as Map)['request'] as Map);
-        }
-        // Some sources (e.g. RG Shows / 1shows.app) deliver MPEG-TS
-        // segments wrapped in a fake PNG container on TikTok CDN. media_kit
-        // can't decode that, so we route the stream through our local HLS
-        // proxy with PNG-stripping enabled.
-        var finalUrl = url;
+            (bh['proxyHeaders'] as Map)['request'] as Map);
+          }
+          // Some sources (e.g. RG Shows / 1shows.app) deliver MPEG-TS
+          // segments wrapped in a fake PNG container on TikTok CDN. media_kit
+          // can't decode that, so we route the stream through our local HLS
+          // proxy with PNG-stripping enabled.
+          var finalUrl = url;
         if (Uri.tryParse(url)?.host.contains('1shows.app') ?? false) {
           final ls = LocalServerService();
           if (ls.port != 0) {
@@ -272,6 +302,9 @@ class WebStreamrService {
     for (final res in await WebStreamrSettings.getExcludedResolutions()) {
       config[excludeResolutionConfigKey(res)] = 'on';
     }
+
+    // Add shorter timeout configuration for all HTTP requests
+    config['requestTimeout'] = '3000'; // 3 seconds in milliseconds
 
     final prefs = await SharedPreferences.getInstance();
     final ip = prefs.getString('webstreamr_client_ip');
