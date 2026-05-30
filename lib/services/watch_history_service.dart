@@ -6,7 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 class WatchHistoryService {
   static final WatchHistoryService _instance = WatchHistoryService._internal();
   factory WatchHistoryService() => _instance;
-  
+
   WatchHistoryService._internal() {
     _init();
   }
@@ -30,27 +30,24 @@ class WatchHistoryService {
     String? imdbId,
     required String title,
     required String posterPath,
-    required String method, // 'stream', 'torrent', 'amri', or 'stremio_direct'
-    required String sourceId, // extraction source or magnet link
-    required int position, // milliseconds
-    required int duration, // milliseconds
+    required String method,
+    required String sourceId,
+    required int position,
+    required int duration,
     int? season,
     int? episode,
     String? episodeTitle,
-    String? magnetLink, // Full magnet link for torrents
-    int? fileIndex, // File index for multi-file torrents
-    String? streamUrl, // Direct stream URL (for stremio_direct)
-    String? stremioId, // Custom Stremio item ID
-    String? stremioAddonBaseUrl, // Addon base URL for re-fetching
-    String? stremioType, // 'movie' or 'series'
-    String? mediaType, // 'movie' or 'tv'
+    String? magnetLink,
+    int? fileIndex,
+    String? streamUrl,
+    String? stremioId,
+    String? stremioAddonBaseUrl,
+    String? stremioType,
+    String? mediaType,
   }) async {
-    // Determine unique ID for this item to prevent duplicates
-    // For movies: tmdbId
-    // For episodes: tmdbId_S{season}_E{episode}
-    final String uniqueId = season != null && episode != null 
-        ? '${tmdbId}_S${season}_E$episode' 
-        : '$tmdbId';
+    final String uniqueId = season != null && episode != null
+    ? '${tmdbId}_S${season}_E$episode'
+    : '$tmdbId';
 
     final entry = {
       'uniqueId': uniqueId,
@@ -65,13 +62,13 @@ class WatchHistoryService {
       'season': season,
       'episode': episode,
       'episodeTitle': episodeTitle,
-      'magnetLink': magnetLink, // Save full magnet link
-      'fileIndex': fileIndex, // Save file index
-      'streamUrl': streamUrl, // Save direct stream URL
-      'stremioId': stremioId, // Save stremio item ID
-      'stremioAddonBaseUrl': stremioAddonBaseUrl, // Save addon base URL
-      'stremioType': stremioType, // Save stremio type
-      'mediaType': mediaType, // Save media type
+      'magnetLink': magnetLink,
+      'fileIndex': fileIndex,
+      'streamUrl': streamUrl,
+      'stremioId': stremioId,
+      'stremioAddonBaseUrl': stremioAddonBaseUrl,
+      'stremioType': stremioType,
+      'mediaType': mediaType,
       'updatedAt': DateTime.now().millisecondsSinceEpoch,
     };
 
@@ -80,20 +77,15 @@ class WatchHistoryService {
       final String? jsonString = await _safeGetString(prefs, _key);
       List<dynamic> list = jsonString != null ? json.decode(jsonString) : [];
 
-      // Remove existing entry with same uniqueId
       list.removeWhere((item) => item['uniqueId'] == uniqueId);
-
-      // Add new entry to the beginning
       list.insert(0, entry);
 
-      // Optional: Limit history size (e.g., 50 items)
       if (list.length > 50) {
         list = list.sublist(0, 50);
       }
 
       await prefs.setString(_key, json.encode(list));
-      
-      // 3. Remove from dismissed list if it was there
+
       final String? dismissedJson = await _safeGetString(prefs, _dismissedKey);
       if (dismissedJson != null) {
         List<dynamic> dismissedList = json.decode(dismissedJson);
@@ -106,24 +98,31 @@ class WatchHistoryService {
 
       debugPrint('[WatchHistory] Saved progress for $title ($uniqueId) at $position ms');
       debugPrint('[WatchHistory] Method: $method, MagnetLink: ${magnetLink?.substring(0, 50)}..., FileIndex: $fileIndex');
-      
-      // Emit update
-      _current = list.cast<Map<String, dynamic>>();
+
+      // ✅ FIX: Use filtered history
+      _current = await getHistory();
       _controller.add(_current);
     } catch (e) {
       debugPrint('[WatchHistory] Error saving progress: $e');
     }
   }
 
-  // Get all history
+  // Get all history - filters out 90%+ watched items
   Future<List<Map<String, dynamic>>> getHistory() async {
     try {
       final prefs = await SharedPreferences.getInstance();
       final String? jsonString = await _safeGetString(prefs, _key);
       if (jsonString == null) return [];
-      
+
       final List<dynamic> list = json.decode(jsonString);
-      return list.cast<Map<String, dynamic>>();
+      final history = list.cast<Map<String, dynamic>>();
+
+      // Filter out items that are 90%+ watched
+      return history.where((item) {
+        final position = item['position'] as int? ?? 0;
+        final duration = item['duration'] as int? ?? 1;
+        return duration <= 0 || position * 10 < duration * 9;
+      }).toList();
     } catch (e) {
       debugPrint('[WatchHistory] Error fetching history: $e');
       return [];
@@ -132,10 +131,10 @@ class WatchHistoryService {
 
   // Get specific item progress
   Future<Map<String, dynamic>?> getProgress(int tmdbId, {int? season, int? episode}) async {
-    final String uniqueId = season != null && episode != null 
-        ? '${tmdbId}_S${season}_E$episode' 
-        : '$tmdbId';
-    
+    final String uniqueId = season != null && episode != null
+    ? '${tmdbId}_S${season}_E$episode'
+    : '$tmdbId';
+
     try {
       final history = await getHistory();
       final match = history.firstWhere(
@@ -152,25 +151,22 @@ class WatchHistoryService {
   Future<void> removeItem(String uniqueId) async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      
-      // 1. Remove from active history
+
       final String? jsonString = await _safeGetString(prefs, _key);
       if (jsonString != null) {
         List<dynamic> list = json.decode(jsonString);
         list.removeWhere((item) => item['uniqueId'] == uniqueId);
         await prefs.setString(_key, json.encode(list));
-        
-        // Emit update
-        _current = list.cast<Map<String, dynamic>>();
+
+        // ✅ FIX: Use filtered history
+        _current = await getHistory();
         _controller.add(_current);
       }
 
-      // 2. Add to dismissed list so it's never re-imported from Trakt
       final String? dismissedJson = await _safeGetString(prefs, _dismissedKey);
       List<dynamic> dismissedList = dismissedJson != null ? json.decode(dismissedJson) : [];
       if (!dismissedList.contains(uniqueId)) {
         dismissedList.add(uniqueId);
-        // Keep dismissed list reasonable (e.g. last 100 items)
         if (dismissedList.length > 100) {
           dismissedList = dismissedList.sublist(dismissedList.length - 100);
         }
@@ -194,10 +190,7 @@ class WatchHistoryService {
       return false;
     }
   }
-  
-  /// Safely read a string pref key. If the value is stored as the wrong type
-  /// (e.g. a List or Map from an older build), removes the bad entry and
-  /// returns null so callers fall back to their empty-state defaults.
+
   Future<String?> _safeGetString(SharedPreferences prefs, String key) async {
     final stored = prefs.get(key);
     if (stored == null) return null;
@@ -211,3 +204,5 @@ class WatchHistoryService {
     _controller.close();
   }
 }
+
+
