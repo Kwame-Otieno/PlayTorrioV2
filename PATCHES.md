@@ -1,19 +1,19 @@
-markdown_content = """# Patches
-
-| # | Fix | File(s) | Date |
-|---|-----|---------|------|
-| 1 | Trakt client ID/secret missing | lib/api/trakt_service.dart | 2026-05-16 |
-| 2 | Trakt token refresh infinite loop | lib/api/trakt_service.dart | 2026-05-16 |
-| 3 | KissKh rate limit crash | lib/api/kisskh_service.dart | 2026-05-16 |
-| 4 | Trakt cache not persisting across restarts | lib/api/trakt_service.dart | 2026-05-16 |
-| 5 | Trakt credentials exposed in repo | lib/api/trakt_service.dart, lib/api/trakt_secrets.dart | 2026-05-16 |
-| 6 | Trakt calendar empty due to timezone | lib/api/trakt_service.dart | 2026-05-17 |
-| 7 | Trakt 401 clears cache and stops loop | lib/api/trakt_service.dart | 2026-05-18 |
-| 8 | Mutex wraps entire _getValidToken() | lib/api/trakt_service.dart | 2026-05-18 |
-| 9 | Simkl credentials moved to local file | lib/api/simkl_service.dart | 2026-05-18 |
-| 10 | Simkl TMDB ID cast fix string vs int | lib/api/simkl_service.dart | 2026-05-18 |
-| 11 | Resolve SharedPreferences type crashes | Multiple Services | 2026-05-19 |
-| 12 | Optimize WebStreamrService | lib/api/web_streamr_service.dart | 2026-05-29 |
+# Patches
+   # | Fix | File(s) | Date |
+ |---|-----|---------|------|
+ | 1 | Trakt client ID/secret missing | lib/api/trakt_service.dart | 2026-05-16 |
+ | 2 | Trakt token refresh infinite loop | lib/api/trakt_service.dart | 2026-05-16 |
+ | 3 | KissKh rate limit crash | lib/api/kisskh_service.dart | 2026-05-16 |
+ | 4 | Trakt cache not persisting across restarts | lib/api/trakt_service.dart | 2026-05-16 |
+ | 5 | Trakt credentials exposed in repo | lib/api/trakt_service.dart, lib/api/trakt_secrets.dart | 2026-05-16 |
+ | 6 | Trakt calendar empty due to timezone | lib/api/trakt_service.dart | 2026-05-17 |
+ | 7 | Trakt 401 clears cache and stops loop | lib/api/trakt_service.dart | 2026-05-18 |
+ | 8 | Mutex wraps entire _getValidToken() | lib/api/trakt_service.dart | 2026-05-18 |
+ | 9 | Simkl credentials moved to local file | lib/api/simkl_service.dart | 2026-05-18 |
+ | 10 | Simkl TMDB ID cast fix string vs int | lib/api/simkl_service.dart | 2026-05-18 |
+ | 11 | Resolve SharedPreferences type crashes | Multiple Services | 2026-05-19 |
+ | 12 | Optimize WebStreamrService | lib/api/web_streamr_service.dart | 2026-05-29 |
+ | 13 | Filter 90%+ watched items from history | lib/services/watch_history_service.dart | 2026-05-30 |
 
 ---
 
@@ -94,3 +94,9 @@ markdown_content = """# Patches
 - **Problem:** Efficiency and reliability issues during stream processing.
 - **Fix:** Prioritized 1080p sources, implemented a blacklist for broken sources, and added timeout configurations.
 - **Date:** 2026-05-29
+
+## Fix 13: Filter 90%+ watched items from history
+- **File:** lib/services/watch_history_service.dart
+- **Problem:** Items at 90% or more completion were still appearing in the watch history, cluttering the list with effectively watched content.
+- **Fix:** Added automatic filtering in `getHistory()` to exclude items where `position/duration >= 90%` using integer arithmetic (`position * 10 >= duration * 9`). Updated `saveProgress()` and `removeItem()` to use the filtered history via `getHistory()` instead of raw SharedPreferences data, ensuring `current` and `historyStream` always return the filtered list. Progress data remains preserved in SharedPreferences for non-destructive filtering, allowing items to reappear if resumed at <90%.
+- **Date:** 2026-05-30
