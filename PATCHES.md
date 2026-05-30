@@ -1,4 +1,4 @@
-# Patches
+markdown_content = """# Patches
 
 | # | Fix | File(s) | Date |
 |---|-----|---------|------|
@@ -12,6 +12,9 @@
 | 8 | Mutex wraps entire _getValidToken() | lib/api/trakt_service.dart | 2026-05-18 |
 | 9 | Simkl credentials moved to local file | lib/api/simkl_service.dart | 2026-05-18 |
 | 10 | Simkl TMDB ID cast fix string vs int | lib/api/simkl_service.dart | 2026-05-18 |
+| 11 | Resolve SharedPreferences type crashes | Multiple Services | 2026-05-19 |
+| 12 | Optimize WebStreamrService | lib/api/web_streamr_service.dart | 2026-05-29 |
+
 ---
 
 ## Fixes
@@ -75,3 +78,19 @@
 - **Problem:** Simkl API returns TMDB IDs as strings but code was casting directly to int? causing a type cast crash on watchlist import
 - **Fix:** Changed cast to handle both string and int formats using int.tryParse() as fallback
 - **Date:** 2026-05-18
+
+## Fix 11: Resolve SharedPreferences type crashes, Trakt sync loop, watchlist duplicates, and null remove crash
+- **File:** Multiple Services
+- **Problem:** Various runtime crashes and synchronization errors related to SharedPreferences type casting, Trakt rate limiting, and null safety.
+- **Fix:** - **my_list_service:** Implemented safe preference reads, addMovieSilent(), and TMDB ID deduplication.
+    - **episode_watched_service:** Enabled safe preference reads for the episodes_watched Map.
+    - **watch_history_service:** Created a _safeGetString() helper for consistent preference access.
+    - **trakt_service:** Added exponential backoff for 429 errors, corrected episode/expiry preference reads, implemented addMovieSilent() for imports, and fixed description syntax errors.
+    - **my_list_screen:** Added null-safe unique ID derivation for removals and a safe UNDO handler.
+- **Date:** 2026-05-19
+
+## Fix 12: Optimize WebStreamrService
+- **File:** lib/api/web_streamr_service.dart
+- **Problem:** Efficiency and reliability issues during stream processing.
+- **Fix:** Prioritized 1080p sources, implemented a blacklist for broken sources, and added timeout configurations.
+- **Date:** 2026-05-29
